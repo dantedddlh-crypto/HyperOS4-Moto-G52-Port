@@ -1,0 +1,86 @@
+name: "Sesión 1: Extraer Base Vendor de Rhode"
+
+on:
+  workflow_dispatch:
+    inputs:
+      super_url:
+        description: "URL directa de descarga de super.emmc.win (o super.img)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  extract-vendor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repositorio
+        uses: actions/checkout@v4
+
+      - name: Instalar herramientas de particiones Android
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y android-sdk-libsparse-utils erofs-utils p7zip-full wget curl tar
+          # Descargar lpunpack y lpmake compilados para Linux x86_64
+          mkdir -p tools
+          wget -q https://github.com/LonelyFool/lpunpack_and_lpmake/releases/download/v1.0/lpunpack_and_lpmake_x86_64.tar.gz -O tools/lp.tar.gz || true
+          if [ -f tools/lp.tar.gz ] && [ -s tools/lp.tar.gz ]; then
+            tar -xzf tools/lp.tar.gz -C tools/
+          else
+            # Fallback: compilar lpunpack/lpmake rápidamente desde fuentes de AOSP/LonelyFool
+            git clone --depth=1 https://github.com/LonelyFool/lpunpack_and_lpmake.git tools/src
+            cd tools/src && ./make.sh && cp bin/* ../ && cd ../..
+          fi
+          chmod +x tools/lpunpack tools/lpmake
+          echo "$PWD/tools" >> $GITHUB_PATH
+
+      - name: Descargar respaldo de super de rhode
+        run: |
+          mkdir -p work
+          curl -L "${{ github.event.inputs.super_url }}" -o work/super_raw.img
+          ls -lh work/super_raw.img
+
+      - name: Convertir si es imagen sparse y extraer particiones con lpunpack
+        run: |
+          cd work
+          # Detectar si super_raw.img es sparse (magic header 3aff26ed) y convertir a raw
+          MAGIC=$(xxd -p -l 4 super_raw.img)
+          if [ "$MAGIC" = "3aff26ed" ]; then
+            echo "Imagen sparse detectada, convirtiendo a raw..."
+            simg2img super_raw.img super_unpacked.img
+            rm -f super_raw.img
+          else
+            echo "Imagen raw detectada."
+            mv super_raw.img super_unpacked.img
+          fi
+
+          mkdir -p extracted
+          lpunpack super_unpacked.img extracted/
+          ls -lh extracted/
+
+      - name: Empaquetar vendor_a.img y manifiestos VINTF de rhode
+        run: |
+          cd work/extracted
+          # Identificar vendor (puede llamarse vendor_a.img o vendor.img)
+          VENDOR_IMG=$(ls vendor*.img | head -n 1)
+          echo "Vendor encontrado: $VENDOR_IMG"
+          
+          # Extraer el manifiesto VINTF y build.prop del vendor para analizarlos en la VivoBook
+          mkdir -p vendor_info
+          7z x "$VENDOR_IMG" etc/vintf/ build.prop -ovendor_info/ -y || true
+          tar -czf vendor_info_rhode.tar.gz vendor_info/
+
+          # Comprimir vendor_a.img con zstd para subirlo rápido a Releases
+          sudo apt-get install -y zstd
+          zstd -T0 -9 "$VENDOR_IMG" -o vendor_rhode_base.img.zst
+          ls -lh vendor_rhode_base.img.zst vendor_info_rhode.tar.gz
+
+      - name: Subir vendor base y manifiestos a GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: base-rhode-vendor
+          name: "Base Vendor Moto G52 (rhode) - Super: 7583301632 bytes"
+          files: |
+            work/extracted/vendor_rhode_base.img.zst
+            work/extracted/vendor_info_rhode.tar.gz
