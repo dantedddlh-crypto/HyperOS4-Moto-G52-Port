@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       super_url:
-        description: "URL directa de descarga de super.emmc.win (o super.img)"
+        description: "URL directa de descarga de super.zip (o super.img)"
         required: true
         type: string
 
@@ -21,30 +21,37 @@ jobs:
       - name: Instalar herramientas de particiones Android
         run: |
           sudo apt-get update
-          sudo apt-get install -y android-sdk-libsparse-utils erofs-utils p7zip-full wget curl tar
-          # Descargar lpunpack y lpmake compilados para Linux x86_64
+          sudo apt-get install -y android-sdk-libsparse-utils erofs-utils p7zip-full wget curl tar zstd file xxd
           mkdir -p tools
           wget -q https://github.com/LonelyFool/lpunpack_and_lpmake/releases/download/v1.0/lpunpack_and_lpmake_x86_64.tar.gz -O tools/lp.tar.gz || true
           if [ -f tools/lp.tar.gz ] && [ -s tools/lp.tar.gz ]; then
             tar -xzf tools/lp.tar.gz -C tools/
           else
-            # Fallback: compilar lpunpack/lpmake rápidamente desde fuentes de AOSP/LonelyFool
             git clone --depth=1 https://github.com/LonelyFool/lpunpack_and_lpmake.git tools/src
             cd tools/src && ./make.sh && cp bin/* ../ && cd ../..
           fi
           chmod +x tools/lpunpack tools/lpmake
           echo "$PWD/tools" >> $GITHUB_PATH
 
-      - name: Descargar respaldo de super de rhode
+      - name: Descargar y descomprimir respaldo de super de rhode
         run: |
           mkdir -p work
-          curl -L "${{ github.event.inputs.super_url }}" -o work/super_raw.img
+          curl -fL "${{ github.event.inputs.super_url }}" -o work/super_download
+          FILE_TYPE=$(file -b work/super_download)
+          echo "Tipo de archivo detectado: $FILE_TYPE"
+          if echo "$FILE_TYPE" | grep -qi "Zip\|7-zip"; then
+            7z x work/super_download -owork/
+            rm -f work/super_download
+            IMG_FOUND=$(find work -maxdepth 2 -name "*.img" | head -n 1)
+            mv "$IMG_FOUND" work/super_raw.img
+          else
+            mv work/super_download work/super_raw.img
+          fi
           ls -lh work/super_raw.img
 
       - name: Convertir si es imagen sparse y extraer particiones con lpunpack
         run: |
           cd work
-          # Detectar si super_raw.img es sparse (magic header 3aff26ed) y convertir a raw
           MAGIC=$(xxd -p -l 4 super_raw.img)
           if [ "$MAGIC" = "3aff26ed" ]; then
             echo "Imagen sparse detectada, convirtiendo a raw..."
@@ -62,17 +69,13 @@ jobs:
       - name: Empaquetar vendor_a.img y manifiestos VINTF de rhode
         run: |
           cd work/extracted
-          # Identificar vendor (puede llamarse vendor_a.img o vendor.img)
           VENDOR_IMG=$(ls vendor*.img | head -n 1)
           echo "Vendor encontrado: $VENDOR_IMG"
           
-          # Extraer el manifiesto VINTF y build.prop del vendor para analizarlos en la VivoBook
           mkdir -p vendor_info
           7z x "$VENDOR_IMG" etc/vintf/ build.prop -ovendor_info/ -y || true
           tar -czf vendor_info_rhode.tar.gz vendor_info/
 
-          # Comprimir vendor_a.img con zstd para subirlo rápido a Releases
-          sudo apt-get install -y zstd
           zstd -T0 -9 "$VENDOR_IMG" -o vendor_rhode_base.img.zst
           ls -lh vendor_rhode_base.img.zst vendor_info_rhode.tar.gz
 
