@@ -21,13 +21,14 @@ jobs:
       - name: Instalar herramientas de particiones Android
         run: |
           sudo apt-get update
-          sudo apt-get install -y android-sdk-libsparse-utils erofs-utils p7zip-full wget curl tar zstd file xxd
+          sudo apt-get install -y android-sdk-libsparse-utils erofs-utils p7zip-full wget curl tar zstd file xxd unzip
           mkdir -p tools
-          wget -q https://github.com/LonelyFool/lpunpack_and_lpmake/releases/download/v1.0/lpunpack_and_lpmake_x86_64.tar.gz -O tools/lp.tar.gz || true
-          if [ -f tools/lp.tar.gz ] && [ -s tools/lp.tar.gz ]; then
-            tar -xzf tools/lp.tar.gz -C tools/
+          wget -q https://github.com/unix3dgforce/Android-OTA-Tools/releases/download/v1.0/otatools-linux.zip -O tools/otatools.zip || true
+          if [ -f tools/otatools.zip ] && [ -s tools/otatools.zip ]; then
+            unzip -q tools/otatools.zip -d tools/
           else
             git clone --depth=1 https://github.com/LonelyFool/lpunpack_and_lpmake.git tools/src
+            sed -i '1i #include <algorithm>' tools/src/liblp/utility.cpp
             cd tools/src && ./make.sh && cp bin/* ../ && cd ../..
           fi
           chmod +x tools/lpunpack tools/lpmake
