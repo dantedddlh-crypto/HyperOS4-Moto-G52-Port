@@ -1,0 +1,125 @@
+name: "Sesión 2: Extraer Donante HyperOS 4 (sapphiren)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      donor_url:
+        description: "URL directa del ZIP donante de HyperOS 4 (sapphiren)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  extract-donor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repositorio
+        uses: actions/checkout@v4
+
+      - name: Instalar herramientas de extracción (lpunpack, payload-dumper-go, erofs)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y erofs-utils android-sdk-libsparse-utils p7zip-full wget curl tar zstd file xxd unzip clang libc++-dev libc++abi-dev brotli
+          mkdir -p tools
+          # Compilar lpunpack/lpmake parcheado
+          git clone --depth=1 https://github.com/LonelyFool/lpunpack_and_lpmake.git tools/src
+          find tools/src -name "*.cpp" -exec sed -i '1i #include <algorithm>' {} +
+          cd tools/src && ./make.sh && cp bin/* ../ && cd ../..
+          rm -rf tools/src
+          # Descargar payload-dumper-go
+          wget -q https://github.com/ssut/payload-dumper-go/releases/download/1.2.2/payload-dumper-go_1.2.2_linux_amd64.tar.gz -O tools/pd.tar.gz
+          tar -xzf tools/pd.tar.gz -C tools/
+          rm -f tools/pd.tar.gz
+          chmod +x tools/lpunpack tools/lpmake tools/payload-dumper-go
+          echo "$PWD/tools" >> $GITHUB_PATH
+
+      - name: Descargar y descomprimir ZIP de HyperMOD OS4.0.30.0
+        run: |
+          mkdir -p work/rom work/out
+          curl -fL "${{ github.event.inputs.donor_url }}" -o work/donor.zip
+          ls -lh work/donor.zip
+          7z x work/donor.zip -owork/rom/ -y
+          rm -f work/donor.zip
+          find work/rom -maxdepth 3 -ls
+
+      - name: Detectar formato y extraer particiones lógicas (system, product, system_ext, mi_ext)
+        run: |
+          if [ -f work/rom/payload.bin ]; then
+            echo "Formato OTA payload.bin detectado."
+            payload-dumper-go -p system,product,system_ext,mi_ext -o work/out/ work/rom/payload.bin
+          elif find work/rom -maxdepth 3 -name "super.img" | grep -q .; then
+            echo "Formato super.img detectado."
+            SUPER_FILE=$(find work/rom -maxdepth 3 -name "super.img" | head -n 1)
+            MAGIC=$(xxd -p -l 4 "$SUPER_FILE")
+            if [ "$MAGIC" = "3aff26ed" ]; then
+              simg2img "$SUPER_FILE" work/super_raw.img
+              rm -f "$SUPER_FILE"
+            else
+              mv "$SUPER_FILE" work/super_raw.img
+            fi
+            mkdir -p work/super_extracted
+            lpunpack work/super_raw.img work/super_extracted/
+            rm -f work/super_raw.img
+            for part in system product system_ext mi_ext; do
+              FOUND=$(ls work/super_extracted/${part}*.img 2>/dev/null | head -n 1 || true)
+              if [ -n "$FOUND" ] && [ -s "$FOUND" ]; then
+                mv "$FOUND" "work/out/${part}.img"
+              fi
+            done
+          else
+            echo "Buscando imágenes directas (.img)..."
+            for part in system product system_ext mi_ext; do
+              FOUND=$(find work/rom -maxdepth 3 -name "${part}*.img" | head -n 1 || true)
+              if [ -n "$FOUND" ] && [ -s "$FOUND" ]; then
+                mv "$FOUND" "work/out/${part}.img"
+              fi
+            done
+          fi
+          rm -rf work/rom work/super_extracted
+          ls -lh work/out/
+
+      - name: Extraer JARs del framework y build.prop para parcheo (Sesión 3)
+        run: |
+          mkdir -p work/jars_for_patch
+          for part in system product system_ext; do
+            if [ -f "work/out/${part}.img" ]; then
+              echo "Inspeccionando ${part}.img..."
+              7z x "work/out/${part}.img" \
+                "system/framework/services.jar" "system/framework/framework.jar" \
+                "framework/services.jar" "framework/framework.jar" "framework/miui-services.jar" \
+                "build.prop" "system/build.prop" "etc/build.prop" \
+                -o"work/jars_for_patch/${part}/" -y || true
+            fi
+          done
+          find work/jars_for_patch -type f
+          tar -czf work/jars_and_props_hyperos4.tar.gz -C work/jars_for_patch .
+          ls -lh work/jars_and_props_hyperos4.tar.gz
+
+      - name: Comprimir particiones individuales por debajo de 1.8 GB
+        run: |
+          cd work/out
+          for img in system.img product.img system_ext.img mi_ext.img; do
+            if [ -f "$img" ]; then
+              echo "Comprimiendo $img..."
+              zstd -T0 -9 "$img" -o "${img}.zst"
+              rm -f "$img"
+              SIZE=$(stat -c%s "${img}.zst")
+              if [ "$SIZE" -gt 1900000000 ]; then
+                echo "$img.zst supera 1.9 GB ($SIZE bytes), dividiendo en partes de 1.8 GB..."
+                split -b 1800M "${img}.zst" "${img}.zst.part_"
+                rm -f "${img}.zst"
+              fi
+            fi
+          done
+          ls -lh
+
+      - name: Publicar particiones base de HyperOS 4 en GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: donor-hyperos4-base
+          name: "Donante HyperOS 4 (sapphiren OS4.0.30.0) - Particiones y JARs"
+          files: |
+            work/out/*
+            work/jars_and_props_hyperos4.tar.gz
