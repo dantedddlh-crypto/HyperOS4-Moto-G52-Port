@@ -17,16 +17,18 @@ jobs:
           df -h /mnt/work
 
           sudo apt-get update
-          sudo apt-get install -y zstd erofs-utils e2fsprogs android-sdk-libsparse-utils p7zip-full python3 libxml2-utils
+          sudo apt-get install -y zstd erofs-utils e2fsprogs android-sdk-libsparse-utils p7zip-full python3 libxml2-utils lpmake || true
 
-          wget -q https://github.com/LonelyFool/lpunpack_and_lpmake/releases/download/2023.09.26/lpunpack_and_lpmake-linux-x86_64.tar.gz -O /tmp/lptools.tar.gz || true
-          if [ -s /tmp/lptools.tar.gz ]; then
-            sudo tar -xzf /tmp/lptools.tar.gz -C /usr/local/bin/
-            sudo chmod +x /usr/local/bin/lp* || true
+          if ! command -v lpmake &> /dev/null; then
+            echo "Descargando lpmake precompilado..."
+            wget -q https://github.com/affggh/lpmake_and_lpunpack/releases/download/v1.0/lpmake -O /tmp/lpmake || true
+            if [ ! -s /tmp/lpmake ]; then
+              wget -q https://raw.githubusercontent.com/sebaubuntu/otatools/master/bin/lpmake -O /tmp/lpmake
+            fi
+            sudo install -m 0755 /tmp/lpmake /usr/local/bin/lpmake
           fi
-          which lpmake || sudo apt-get install -y lptools || true
           lpmake --help | head -n 5
-
+          
       - name: Descargar Releases (base-rhode-vendor, donor-hyperos4-base, patched-jars)
         env:
           GH_TOKEN: ${{ github.token }}
