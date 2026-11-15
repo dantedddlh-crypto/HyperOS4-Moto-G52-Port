@@ -1,0 +1,304 @@
+name: Build HyperOS 4 Port (rhode)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-super:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Preparar espacio en /mnt/work e instalar herramientas
+        run: |
+          sudo mkdir -p /mnt/work/{downloads,raw,extracted,images,out}
+          sudo chown -R $USER:$USER /mnt/work
+          df -h /mnt/work
+
+          sudo apt-get update
+          sudo apt-get install -y zstd erofs-utils e2fsprogs android-sdk-libsparse-utils p7zip-full python3 libxml2-utils
+
+          wget -q https://github.com/LonelyFool/lpunpack_and_lpmake/releases/download/2023.09.26/lpunpack_and_lpmake-linux-x86_64.tar.gz -O /tmp/lptools.tar.gz || true
+          if [ -s /tmp/lptools.tar.gz ]; then
+            sudo tar -xzf /tmp/lptools.tar.gz -C /usr/local/bin/
+            sudo chmod +x /usr/local/bin/lp* || true
+          fi
+          which lpmake || sudo apt-get install -y lptools || true
+          lpmake --help | head -n 5
+
+      - name: Descargar Releases (base-rhode-vendor, donor-hyperos4-base, patched-jars)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download base-rhode-vendor -R ${{ github.repository }} -p "vendor_rhode_base.img.zst" -D /mnt/work/downloads
+          gh release download patched-jars -R ${{ github.repository }} -p "services.jar" -D /mnt/work/downloads
+          gh release download donor-hyperos4-base -R ${{ github.repository }} -p "system.img.zst" -D /mnt/work/downloads
+          gh release download donor-hyperos4-base -R ${{ github.repository }} -p "system_ext.img.zst" -D /mnt/work/downloads
+          gh release download donor-hyperos4-base -R ${{ github.repository }} -p "mi_ext.img.zst" -D /mnt/work/downloads
+          gh release download donor-hyperos4-base -R ${{ github.repository }} -p "product.img.zst.part_*" -D /mnt/work/downloads
+          ls -lh /mnt/work/downloads
+
+      - name: Unir y descomprimir imágenes base en /mnt/work/raw
+        run: |
+          cd /mnt/work/downloads
+          cat product.img.zst.part_* > product.img.zst
+          rm -f product.img.zst.part_*
+
+          for img in vendor_rhode_base system system_ext mi_ext product; do
+            echo "Descomprimiendo ${img}.img.zst..."
+            zstd -d "${img}.img.zst" -o "/mnt/work/raw/${img}.img"
+            rm -f "${img}.img.zst"
+          done
+
+          for f in /mnt/work/raw/*.img; do
+            if file "$f" | grep -q "Android sparse image"; then
+              echo "Convirtiendo sparse a raw: $f"
+              simg2img "$f" "${f}.raw" && mv "${f}.raw" "$f"
+            fi
+          done
+          ls -lh /mnt/work/raw
+          df -h /mnt/work
+
+      - name: Extraer particiones donantes (soporte automático EROFS y EXT4)
+        run: |
+          extract_img() {
+            local IMG_PATH="$1"
+            local OUT_DIR="$2"
+            mkdir -p "$OUT_DIR"
+            if blkid "$IMG_PATH" | grep -qi "erofs" || file "$IMG_PATH" | grep -qi "EROFS"; then
+              echo "Extrayendo EROFS: $IMG_PATH -> $OUT_DIR"
+              sudo fsck.erofs --extract="$OUT_DIR" "$IMG_PATH"
+            else
+              echo "Montando y copiando EXT4: $IMG_PATH -> $OUT_DIR"
+              mkdir -p /mnt/work/tmp_mnt
+              sudo mount -o ro,loop "$IMG_PATH" /mnt/work/tmp_mnt
+              sudo cp -a /mnt/work/tmp_mnt/. "$OUT_DIR/"
+              sudo umount /mnt/work/tmp_mnt
+            fi
+          }
+
+          extract_img /mnt/work/raw/system.img /mnt/work/extracted/system
+          extract_img /mnt/work/raw/system_ext.img /mnt/work/extracted/system_ext
+          extract_img /mnt/work/raw/product.img /mnt/work/extracted/product
+          extract_img /mnt/work/raw/mi_ext.img /mnt/work/extracted/mi_ext
+
+          rm -f /mnt/work/raw/system.img /mnt/work/raw/system_ext.img /mnt/work/raw/product.img /mnt/work/raw/mi_ext.img
+          df -h /mnt/work
+
+      - name: Inyectar services.jar, fusionar mi_ext, purga masiva y props de rhode
+        run: |
+          # 1. Inyectar services.jar parcheado (Sesión 3)
+          SYS_ROOT="/mnt/work/extracted/system"
+          SYS_DIR="$SYS_ROOT/system"
+          [ ! -d "$SYS_DIR" ] && SYS_DIR="$SYS_ROOT"
+
+          sudo cp -f /mnt/work/downloads/services.jar "$SYS_DIR/framework/services.jar"
+          sudo chmod 0644 "$SYS_DIR/framework/services.jar"
+          sudo chown root:root "$SYS_DIR/framework/services.jar"
+          sudo rm -rf "$SYS_DIR/framework/oat/arm64/services."* "$SYS_DIR/framework/oat/arm/services."* || true
+
+          # 2. Fusionar mi_ext en product preservando permisos y concatenando su build.prop
+          echo "Fusionando mi_ext en product..."
+          if [ -f "/mnt/work/extracted/mi_ext/etc/build.prop" ] && [ -f "/mnt/work/extracted/product/etc/build.prop" ]; then
+            echo "" | sudo tee -a /mnt/work/extracted/product/etc/build.prop > /dev/null
+            echo "# Merged from mi_ext" | sudo tee -a /mnt/work/extracted/product/etc/build.prop > /dev/null
+            sudo cat /mnt/work/extracted/mi_ext/etc/build.prop | sudo tee -a /mnt/work/extracted/product/etc/build.prop > /dev/null
+          fi
+          sudo cp -rnp /mnt/work/extracted/mi_ext/* /mnt/work/extracted/product/ || true
+          sudo rm -rf /mnt/work/extracted/mi_ext
+
+          # Crear symlink /mi_ext -> /product en la raíz de system
+          sudo rm -rf "$SYS_ROOT/mi_ext"
+          sudo ln -sf /product "$SYS_ROOT/mi_ext"
+
+          # 3. PURGA MASIVA DE PRODUCT Y SYSTEM_EXT (Recortando 1.1+ GB extra)
+          PROD_DIR="/mnt/work/extracted/product"
+          SYSEXT_DIR="/mnt/work/extracted/system_ext"
+
+          # 3a. Eliminar precompilados oat y cachés
+          sudo find "$PROD_DIR/app" "$PROD_DIR/priv-app" -type d -name "oat" -exec rm -rf {} + 2>/dev/null || true
+          sudo find "$SYS_DIR/app" "$SYS_DIR/priv-app" -type d -name "oat" -exec rm -rf {} + 2>/dev/null || true
+          sudo find "$SYSEXT_DIR/app" "$SYSEXT_DIR/priv-app" -type d -name "oat" -exec rm -rf {} + 2>/dev/null || true
+
+          # 3b. Eliminar data-app, modelos offline de voz (usr/srec) y pangu
+          sudo rm -rf "$PROD_DIR/data-app/"* "$PROD_DIR/usr/srec/"* "$PROD_DIR/pangu/"* 2>/dev/null || true
+
+          # 3c. Podar multimedia pesada, ringtones masivos, wallpapers y temas de fábrica en product
+          sudo rm -rf "$PROD_DIR/media/theme/"* "$PROD_DIR/media/wallpaper/"* "$PROD_DIR/media/audio/alarms/"* "$PROD_DIR/media/audio/ringtones/"* "$PROD_DIR/media/audio/notifications/"* 2>/dev/null || true
+          sudo rm -rf "$PROD_DIR/fonts/Miui*Chinese*" "$PROD_DIR/fonts/NotoSansSC*" 2>/dev/null || true
+
+          # 3d. Eliminar overlays y APKs de región o bloatware masivo + apps secundarias reemplazables
+          sudo rm -rf "$PROD_DIR/overlay/"* 2>/dev/null || true
+
+          BLOAT_APPS=(
+            "MiBrowser" "MiBrowserGlobal" "MIUIBrowser"
+            "MiVideo" "MIUIVideo" "MiMusic" "MIUIMusic"
+            "Health" "MIUIHealth" "GameCenter" "MIUIGameCenter"
+            "Midrop" "AnalyticsCore" "MSA" "MSA-Global"
+            "YellowPage" "MIUIYellowPage" "GlobalFashionStore"
+            "PartnerBookmarksProvider" "GoogleOne" "YouTube"
+            "YouTubeMusic" "Music2" "Duo" "Meet" "Maps"
+            "Photos" "Gmail2" "Chrome" "Velvet" "GoogleTTS"
+            "Drive" "Docs" "Sheets" "Slides" "CalendarGoogle"
+            "Videos" "PlayGames" "AndroidAutoStub" "Recorder"
+            "MiRadio" "FM" "MiBugReport" "MIUIBugReport"
+            "HybridAccessory" "HybridPlatform" "Joyose"
+            "PaymentService" "Mipay" "NextPay" "XMSFKeeper"
+            "CIT" "XiaomiAccount" "AppStore" "Fengmi" "Duokan"
+            "MiConnectService" "MiShop" "Milab" "MiCredit"
+            "YouDaoEngine" "SogouInput" "BaiduIME" "PersonalAssistant"
+            "SoterServiceProvider" "UserGuide" "WpsLite" "BuiltInPrintService"
+            "Gallery" "MiuiGallery" "Weather" "MiuiWeather" "Calculator"
+            "Clock" "Notes" "MiuiNotes" "Scanner" "Compass" "ScreenRecorder"
+            "VoiceRecorder" "Screencast" "FileExplorer" "Updater" "SystemUpdater"
+          )
+          for app in "${BLOAT_APPS[@]}"; do
+            sudo rm -rf "$PROD_DIR/app/$app" "$PROD_DIR/priv-app/$app" "$SYS_DIR/app/$app" "$SYS_DIR/priv-app/$app" "$SYSEXT_DIR/app/$app" "$SYSEXT_DIR/priv-app/$app" || true
+          done
+
+          echo "=== Peso real tras purga masiva ==="
+          echo "System:     $(sudo du -sh "$SYS_ROOT" | awk '{print $1}')"
+          echo "System_ext: $(sudo du -sh "$SYSEXT_DIR" | awk '{print $1}')"
+          echo "Product:    $(sudo du -sh "$PROD_DIR" | awk '{print $1}')"
+
+          # 4. Verificar VNDK 30 y matriz VINTF level 5
+          if [ ! -f "$SYS_DIR/etc/vintf/compatibility_matrix.5.xml" ] && [ ! -f "$SYSEXT_DIR/etc/vintf/compatibility_matrix.5.xml" ]; then
+            echo "Creando compatibility_matrix.5.xml mínimo para vendor FCM 5..."
+            sudo tee "$SYS_DIR/etc/vintf/compatibility_matrix.5.xml" > /dev/null << 'EOF'
+          <compatibility-matrix version="1.0" type="framework" level="5">
+              <sepolicy>
+                  <kernel-sepolicy-version>30</kernel-sepolicy-version>
+                  <sepolicy-version>30.0</sepolicy-version>
+              </sepolicy>
+          </compatibility-matrix>
+          EOF
+            sudo chmod 0644 "$SYS_DIR/etc/vintf/compatibility_matrix.5.xml"
+            sudo chown root:root "$SYS_DIR/etc/vintf/compatibility_matrix.5.xml"
+          fi
+
+          # 5. Ajustar build.prop de system y product para Moto G52 (rhode)
+          SYS_PROP="$SYS_DIR/build.prop"
+          PROD_PROP="$PROD_DIR/etc/build.prop"
+          [ ! -f "$PROD_PROP" ] && PROD_PROP="$PROD_DIR/build.prop"
+
+          for P in "$SYS_PROP" "$PROD_PROP"; do
+            if [ -f "$P" ]; then
+              echo "Parcheando $P..."
+              sudo sed -i 's/sapphiren/rhode/g' "$P"
+              sudo sed -i '/^ro.sf.lcd_density=/d' "$P"
+              sudo sed -i '/^ro.surface_flinger.use_smart_90_for_video=/d' "$P"
+              sudo sed -i '/^ro.hardware.fp.fod=/d' "$P"
+              sudo sed -i '/^ro.vendor.dolby.dax.version=/d' "$P"
+              echo "" | sudo tee -a "$P" > /dev/null
+              echo "# Moto G52 (rhode) Port Adjustments" | sudo tee -a "$P" > /dev/null
+              echo "ro.sf.lcd_density=400" | sudo tee -a "$P" > /dev/null
+              echo "ro.surface_flinger.use_smart_90_for_video=true" | sudo tee -a "$P" > /dev/null
+              echo "ro.hardware.fp.fod=false" | sudo tee -a "$P" > /dev/null
+              echo "ro.product.model=moto g52" | sudo tee -a "$P" > /dev/null
+              echo "ro.product.device=rhode" | sudo tee -a "$P" > /dev/null
+            fi
+          done
+
+      - name: Reconstruir particiones EXT4 optimizadas
+        run: |
+          build_ext4() {
+            local SRC_DIR="$1"
+            local OUT_IMG="$2"
+            local MNT_POINT="$3"
+
+            local REAL_BYTES=$(sudo du -sb "$SRC_DIR" | awk '{print $1}')
+            local TARGET_BYTES=$(( (REAL_BYTES * 105 / 100 + 20971520 + 4095) / 4096 * 4096 ))
+            local INODE_COUNT=$(sudo find "$SRC_DIR" | wc -l)
+            INODE_COUNT=$(( INODE_COUNT + 1024 ))
+
+            echo "Construyendo $OUT_IMG ($TARGET_BYTES bytes, $INODE_COUNT inodos) desde $SRC_DIR..."
+
+            truncate -s "$TARGET_BYTES" "$OUT_IMG"
+            mkfs.ext4 -F -m 0 -N "$INODE_COUNT" -O ^has_journal -L "$MNT_POINT" "$OUT_IMG"
+            mkdir -p /mnt/work/build_mnt
+            sudo mount -o loop "$OUT_IMG" /mnt/work/build_mnt
+            sudo cp -a "$SRC_DIR/." /mnt/work/build_mnt/
+            sudo umount /mnt/work/build_mnt
+            e2fsck -fy "$OUT_IMG" || true
+            sudo rm -rf "$SRC_DIR"
+          }
+
+          build_ext4 /mnt/work/extracted/system /mnt/work/images/system_a.img system
+          build_ext4 /mnt/work/extracted/system_ext /mnt/work/images/system_ext_a.img system_ext
+          build_ext4 /mnt/work/extracted/product /mnt/work/images/product_a.img product
+          mv /mnt/work/raw/vendor_rhode_base.img /mnt/work/images/vendor_a.img
+
+          ls -lh /mnt/work/images
+
+      - name: Ensamblar super_hyperos.img con lpmake (7583301632 bytes)
+        run: |
+          cd /mnt/work/images
+          SYS_SIZE=$(stat -c%s system_a.img)
+          SYSEXT_SIZE=$(stat -c%s system_ext_a.img)
+          PROD_SIZE=$(stat -c%s product_a.img)
+          VEND_SIZE=$(stat -c%s vendor_a.img)
+          TOTAL_PARTS=$((SYS_SIZE + SYSEXT_SIZE + PROD_SIZE + VEND_SIZE))
+          SUPER_MAX=7583301632
+
+          echo "System:     $SYS_SIZE"
+          echo "System_ext: $SYSEXT_SIZE"
+          echo "Product:    $PROD_SIZE"
+          echo "Vendor:     $VEND_SIZE"
+          echo "Suma total: $TOTAL_PARTS / Max permitido: $SUPER_MAX"
+
+          if [ "$TOTAL_PARTS" -ge $((SUPER_MAX - 10485760)) ]; then
+            echo "ERROR: La suma de particiones excede el tamaño de super de rhode!"
+            exit 1
+          fi
+
+          lpmake \
+            --metadata-size 65536 \
+            --super-name super \
+            --metadata-slots 3 \
+            --virtual-ab \
+            --device super:${SUPER_MAX} \
+            --group moto_dynamic_partitions_a:${SUPER_MAX} \
+            --group moto_dynamic_partitions_b:${SUPER_MAX} \
+            --partition system_a:readonly:${SYS_SIZE}:moto_dynamic_partitions_a \
+            --image system_a=system_a.img \
+            --partition system_b:readonly:0:moto_dynamic_partitions_b \
+            --partition system_ext_a:readonly:${SYSEXT_SIZE}:moto_dynamic_partitions_a \
+            --image system_ext_a=system_ext_a.img \
+            --partition system_ext_b:readonly:0:moto_dynamic_partitions_b \
+            --partition product_a:readonly:${PROD_SIZE}:moto_dynamic_partitions_a \
+            --image product_a=product_a.img \
+            --partition product_b:readonly:0:moto_dynamic_partitions_b \
+            --partition vendor_a:readonly:${VEND_SIZE}:moto_dynamic_partitions_a \
+            --image vendor_a=vendor_a.img \
+            --partition vendor_b:readonly:0:moto_dynamic_partitions_b \
+            --sparse \
+            --output /mnt/work/out/super_hyperos.img
+
+          rm -f /mnt/work/images/*.img
+          ls -lh /mnt/work/out/super_hyperos.img
+
+      - name: Comprimir super_hyperos.img y publicar Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd /mnt/work/out
+          zstd -T0 -6 super_hyperos.img -o super_hyperos.img.zst
+          rm -f super_hyperos.img
+          ls -lh super_hyperos.img.zst
+
+          FILE_SIZE=$(stat -c%s super_hyperos.img.zst)
+          if [ "$FILE_SIZE" -gt 2040109465 ]; then
+            echo "Dividiendo super_hyperos.img.zst para cumplir límite de 2 GB de GitHub..."
+            split -b 1900M super_hyperos.img.zst super_hyperos.img.zst.part_
+            rm -f super_hyperos.img.zst
+          fi
+
+          gh release delete hyperos4-rhode-alpha1 -R ${{ github.repository }} -y || true
+          gh release create hyperos4-rhode-alpha1 /mnt/work/out/super_hyperos.img.zst* \
+            -R ${{ github.repository }} \
+            --title "HyperOS 4 Port Alpha 1 - Moto G52 (rhode)" \
+            --notes "Ensamblado automático con purga masiva, services.jar parcheado, mi_ext fusionado en product (/mi_ext symlink), VINTF level 5, VNDK 30, 90Hz y vendor base de rhode."
