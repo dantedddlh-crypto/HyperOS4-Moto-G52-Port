@@ -86,7 +86,7 @@ jobs:
           rm -f /mnt/work/raw/system.img /mnt/work/raw/system_ext.img /mnt/work/raw/product.img /mnt/work/raw/mi_ext.img
           df -h /mnt/work
 
-      - name: Inyectar services.jar, fusionar mi_ext, purga final 600MB y props de rhode
+      - name: Inyectar services.jar, fusionar mi_ext, purga final CN y props de rhode
         run: |
           # 1. Inyectar services.jar parcheado (Sesión 3)
           SYS_ROOT="/mnt/work/extracted/system"
@@ -112,7 +112,7 @@ jobs:
           sudo rm -rf "$SYS_ROOT/mi_ext"
           sudo ln -sf /product "$SYS_ROOT/mi_ext"
 
-          # 3. PURGA PROFUNDA CN + RECORTE FINAL DE ~600 MB
+          # 3. PURGA PROFUNDA CN + RECORTE FINAL
           PROD_DIR="/mnt/work/extracted/product"
           SYSEXT_DIR="/mnt/work/extracted/system_ext"
 
@@ -236,21 +236,18 @@ jobs:
             local OUT_IMG="$2"
             local MNT_POINT="$3"
 
-            # Margen ajustado al máximo (1% + 4 MB) ya que las particiones son readonly en super
+            # Usar mkfs.ext4 -d con +48 MB de margen para metadatos EXT4 y luego compactar con resize2fs -M
             local REAL_BYTES=$(sudo du -sb "$SRC_DIR" | awk '{print $1}')
-            local TARGET_BYTES=$(( (REAL_BYTES * 101 / 100 + 4194304 + 4095) / 4096 * 4096 ))
+            local TARGET_BYTES=$(( (REAL_BYTES + 50331648 + 4095) / 4096 * 4096 ))
             local INODE_COUNT=$(sudo find "$SRC_DIR" | wc -l)
-            INODE_COUNT=$(( INODE_COUNT + 256 ))
+            INODE_COUNT=$(( INODE_COUNT + 512 ))
 
-            echo "Construyendo $OUT_IMG ($TARGET_BYTES bytes, $INODE_COUNT inodos) desde $SRC_DIR..."
+            echo "Construyendo $OUT_IMG ($TARGET_BYTES bytes iniciales, $INODE_COUNT inodos) desde $SRC_DIR..."
 
             truncate -s "$TARGET_BYTES" "$OUT_IMG"
-            mkfs.ext4 -F -m 0 -N "$INODE_COUNT" -O ^has_journal -L "$MNT_POINT" "$OUT_IMG"
-            mkdir -p /mnt/work/build_mnt
-            sudo mount -o loop "$OUT_IMG" /mnt/work/build_mnt
-            sudo cp -a "$SRC_DIR/." /mnt/work/build_mnt/
-            sudo umount /mnt/work/build_mnt
+            sudo mkfs.ext4 -F -m 0 -N "$INODE_COUNT" -O ^has_journal -L "$MNT_POINT" -d "$SRC_DIR" "$OUT_IMG"
             e2fsck -fy "$OUT_IMG" || true
+            resize2fs -M "$OUT_IMG"
             sudo rm -rf "$SRC_DIR"
           }
 
@@ -328,4 +325,4 @@ jobs:
           gh release create hyperos4-rhode-alpha1 /mnt/work/out/super_hyperos.img.zst* \
             -R ${{ github.repository }} \
             --title "HyperOS 4 Port Alpha 1 - Moto G52 (rhode)" \
-            --notes "Ensamblado automático con purga final CN, services.jar parcheado, mi_ext fusionado en product (/mi_ext symlink), VINTF level 5, VNDK 30, 90Hz y vendor base de rhode."
+            --notes "Ensamblado automático con mkfs.ext4 -d compactado, purga final CN, services.jar parcheado, mi_ext fusionado en product (/mi_ext symlink), VINTF level 5, VNDK 30, 90Hz y vendor base de rhode."
