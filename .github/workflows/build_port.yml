@@ -17,22 +17,17 @@ jobs:
           df -h /mnt/work
 
           sudo apt-get update
-          sudo apt-get install -y zstd erofs-utils e2fsprogs android-sdk-libsparse-utils p7zip-full python3 libxml2-utils git cmake build-essential zlib1g-dev libssl-dev
+          sudo apt-get install -y zstd erofs-utils e2fsprogs android-sdk-libsparse-utils p7zip-full python3 libxml2-utils git clang lld build-essential zlib1g-dev libssl-dev
 
-          # Obtener o compilar lpmake si no está en el sistema
+          # Compilar lpmake parching #include <algorithm> para GCC 14 / Clang moderno
           if ! command -v lpmake &> /dev/null; then
-            echo "Buscando o compilando lpmake..."
-            git clone --depth=1 https://github.com/LonelyFool/lpunpack_and_lpmake.git /tmp/lptools_src || true
-            if [ -d "/tmp/lptools_src" ]; then
-              cd /tmp/lptools_src
-              chmod +x make.sh || true
-              ./make.sh || g++ -std=c++17 -O2 -Iinclude -D_FILE_OFFSET_BITS=64 src/*.cpp -lz -lcrypto -lpthread -o /tmp/lpmake || true
-            fi
-            if [ -f "/tmp/lptools_src/bin/lpmake" ]; then
-              sudo install -m 0755 /tmp/lptools_src/bin/lpmake /usr/local/bin/lpmake
-            elif [ -f "/tmp/lpmake" ]; then
-              sudo install -m 0755 /tmp/lpmake /usr/local/bin/lpmake
-            fi
+            echo "Clonando y compilando lpmake..."
+            git clone --depth=1 https://github.com/LonelyFool/lpunpack_and_lpmake.git /tmp/lptools_src
+            cd /tmp/lptools_src
+            sed -i '1i #include <algorithm>' liblp/utility.cpp
+            chmod +x make.sh
+            ./make.sh
+            sudo install -m 0755 bin/lpmake /usr/local/bin/lpmake
           fi
 
           which lpmake
