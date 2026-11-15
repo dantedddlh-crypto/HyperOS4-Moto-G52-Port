@@ -125,9 +125,10 @@ jobs:
           sudo find "$SYS_DIR/app" "$SYS_DIR/priv-app" -type d -name "oat" -exec rm -rf {} + 2>/dev/null || true
           sudo find "$SYSEXT_DIR/app" "$SYSEXT_DIR/priv-app" -type d -name "oat" -exec rm -rf {} + 2>/dev/null || true
 
-          # 3b. Eliminar data-app y modelos pesados offline de voz (usr/srec)
+          # 3b. Eliminar data-app, modelos pesados offline de voz (usr/srec) y prebuilds pesados
           sudo rm -rf "$PROD_DIR/data-app/"* || true
           sudo rm -rf "$PROD_DIR/usr/srec/"* || true
+          sudo rm -rf "$PROD_DIR/pangu/system/data-app/"* 2>/dev/null || true
 
           # 3c. Eliminar APKs pesados prescindibles (instalables desde Play Store)
           BLOAT_APPS=(
@@ -149,9 +150,12 @@ jobs:
             sudo rm -rf "$PROD_DIR/app/$app" "$PROD_DIR/priv-app/$app" || true
           done
 
-          echo "Tamaño de system DESPUÉS:     $(sudo du -sh "$SYS_ROOT" | awk '{print $1}')"
-          echo "Tamaño de system_ext DESPUÉS: $(sudo du -sh "$SYSEXT_DIR" | awk '{print $1}')"
-          echo "Tamaño de product DESPUÉS:    $(sudo du -sh "$PROD_DIR" | awk '{print $1}')"
+          echo "=== Peso real de carpetas tras debloat ==="
+          echo "System:     $(sudo du -sh "$SYS_ROOT" | awk '{print $1}')"
+          echo "System_ext: $(sudo du -sh "$SYSEXT_DIR" | awk '{print $1}')"
+          echo "Product:    $(sudo du -sh "$PROD_DIR" | awk '{print $1}')"
+          echo "=== Top carpetas dentro de product ==="
+          sudo du -sh "$PROD_DIR"/* 2>/dev/null | sort -hr | head -n 10
 
           # 4. Verificar VNDK 30 y matriz VINTF level 5
           if [ ! -f "$SYS_DIR/etc/vintf/compatibility_matrix.5.xml" ] && [ ! -f "$SYSEXT_DIR/etc/vintf/compatibility_matrix.5.xml" ]; then
@@ -198,23 +202,21 @@ jobs:
             local OUT_IMG="$2"
             local MNT_POINT="$3"
 
-            # Dar +600 MB holgados para la copia inicial y luego compactar al mínimo real con resize2fs -M
-            local SIZE_MB=$(sudo du -sm "$SRC_DIR" | awk '{print $1 + 600}')
-            echo "Construyendo $OUT_IMG (${SIZE_MB}M iniciales) desde $SRC_DIR..."
+            # Calcular tamaño exacto de archivos + 6% para inodos EXT4 (sin journal) + 24 MB fijos
+            local REAL_BYTES=$(sudo du -sb "$SRC_DIR" | awk '{print $1}')
+            local TARGET_BYTES=$(( (REAL_BYTES * 106 / 100 + 25165824 + 4095) / 4096 * 4096 ))
+            local INODE_COUNT=$(sudo find "$SRC_DIR" | wc -l)
+            INODE_COUNT=$(( INODE_COUNT + 2048 ))
 
-            truncate -s "${SIZE_MB}M" "$OUT_IMG"
-            mkfs.ext4 -F -m 0 -O ^has_journal -L "$MNT_POINT" "$OUT_IMG"
+            echo "Construyendo $OUT_IMG ($TARGET_BYTES bytes, $INODE_COUNT inodos) desde $SRC_DIR..."
+
+            truncate -s "$TARGET_BYTES" "$OUT_IMG"
+            mkfs.ext4 -F -m 0 -N "$INODE_COUNT" -O ^has_journal -L "$MNT_POINT" "$OUT_IMG"
             mkdir -p /mnt/work/build_mnt
             sudo mount -o loop "$OUT_IMG" /mnt/work/build_mnt
             sudo cp -a "$SRC_DIR/." /mnt/work/build_mnt/
             sudo umount /mnt/work/build_mnt
             e2fsck -fy "$OUT_IMG" || true
-            resize2fs -M "$OUT_IMG"
-            # Añadir 16 MB de margen tras compactar
-            local FINAL_BYTES=$(stat -c%s "$OUT_IMG")
-            local PADDED_BYTES=$(( (FINAL_BYTES + 16777216 + 4095) / 4096 * 4096 ))
-            truncate -s "$PADDED_BYTES" "$OUT_IMG"
-            resize2fs "$OUT_IMG"
             sudo rm -rf "$SRC_DIR"
           }
 
