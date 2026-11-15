@@ -89,7 +89,7 @@ jobs:
           rm -f /mnt/work/raw/system.img /mnt/work/raw/system_ext.img /mnt/work/raw/product.img /mnt/work/raw/mi_ext.img
           df -h /mnt/work
 
-      - name: Inyectar services.jar, fusionar mi_ext, debloat seguro y props de rhode
+      - name: Inyectar services.jar, fusionar mi_ext, debloat quirúrgico y props de rhode
         run: |
           # 1. Inyectar services.jar parcheado (Sesión 3)
           SYS_ROOT="/mnt/work/extracted/system"
@@ -115,22 +115,23 @@ jobs:
           sudo rm -rf "$SYS_ROOT/mi_ext"
           sudo ln -sf /product "$SYS_ROOT/mi_ext"
 
-          # 3. DEBLOAT SEGURO en product, system y system_ext (para ajustar super <= 7.58 GB)
+          # 3. LIMPIEZA QUIRÚRGICA PROFUNDA (para recortar ~1.2 GB extra)
           PROD_DIR="/mnt/work/extracted/product"
           SYSEXT_DIR="/mnt/work/extracted/system_ext"
-          echo "Tamaño de product ANTES de debloat: $(sudo du -sh "$PROD_DIR" | awk '{print $1}')"
 
-          # 3a. Eliminar precompilados oat en apps de product, system y system_ext (Android los regenera en /data)
+          # 3a. Eliminar precompilados oat en apps
           sudo find "$PROD_DIR/app" "$PROD_DIR/priv-app" -type d -name "oat" -exec rm -rf {} + 2>/dev/null || true
           sudo find "$SYS_DIR/app" "$SYS_DIR/priv-app" -type d -name "oat" -exec rm -rf {} + 2>/dev/null || true
           sudo find "$SYSEXT_DIR/app" "$SYSEXT_DIR/priv-app" -type d -name "oat" -exec rm -rf {} + 2>/dev/null || true
 
-          # 3b. Eliminar data-app, modelos pesados offline de voz (usr/srec) y prebuilds pesados
-          sudo rm -rf "$PROD_DIR/data-app/"* || true
-          sudo rm -rf "$PROD_DIR/usr/srec/"* || true
-          sudo rm -rf "$PROD_DIR/pangu/system/data-app/"* 2>/dev/null || true
+          # 3b. Eliminar data-app, modelos offline de voz (usr/srec) y pangu
+          sudo rm -rf "$PROD_DIR/data-app/"* "$PROD_DIR/usr/srec/"* "$PROD_DIR/pangu/"* 2>/dev/null || true
 
-          # 3c. Eliminar APKs pesados prescindibles (instalables desde Play Store)
+          # 3c. Eliminar fuentes pesadas chinas/asiáticas y fondos de pantalla masivos en product
+          sudo rm -rf "$PROD_DIR/media/theme/default/wallpaper/"* 2>/dev/null || true
+          sudo rm -rf "$PROD_DIR/fonts/Miui*Chinese*" "$PROD_DIR/fonts/NotoSansSC*" 2>/dev/null || true
+
+          # 3d. Lista masiva de apps chinas/bloatware en product
           BLOAT_APPS=(
             "MiBrowser" "MiBrowserGlobal" "MIUIBrowser"
             "MiVideo" "MIUIVideo" "MiMusic" "MIUIMusic"
@@ -145,17 +146,18 @@ jobs:
             "MiRadio" "FM" "MiBugReport" "MIUIBugReport"
             "HybridAccessory" "HybridPlatform" "Joyose"
             "PaymentService" "Mipay" "NextPay" "XMSFKeeper"
+            "CIT" "XiaomiAccount" "AppStore" "Fengmi" "Duokan"
+            "MiConnectService" "MiShop" "Milab" "MiCredit"
+            "YouDaoEngine" "SogouInput" "BaiduIME" "PersonalAssistant"
           )
           for app in "${BLOAT_APPS[@]}"; do
-            sudo rm -rf "$PROD_DIR/app/$app" "$PROD_DIR/priv-app/$app" || true
+            sudo rm -rf "$PROD_DIR/app/$app" "$PROD_DIR/priv-app/$app" "$SYS_DIR/app/$app" "$SYS_DIR/priv-app/$app" || true
           done
 
-          echo "=== Peso real de carpetas tras debloat ==="
+          echo "=== Peso real de particiones tras limpieza quirúrgica ==="
           echo "System:     $(sudo du -sh "$SYS_ROOT" | awk '{print $1}')"
           echo "System_ext: $(sudo du -sh "$SYSEXT_DIR" | awk '{print $1}')"
           echo "Product:    $(sudo du -sh "$PROD_DIR" | awk '{print $1}')"
-          echo "=== Top carpetas dentro de product ==="
-          sudo du -sh "$PROD_DIR"/* 2>/dev/null | sort -hr | head -n 10
 
           # 4. Verificar VNDK 30 y matriz VINTF level 5
           if [ ! -f "$SYS_DIR/etc/vintf/compatibility_matrix.5.xml" ] && [ ! -f "$SYSEXT_DIR/etc/vintf/compatibility_matrix.5.xml" ]; then
@@ -202,11 +204,10 @@ jobs:
             local OUT_IMG="$2"
             local MNT_POINT="$3"
 
-            # Calcular tamaño exacto de archivos + 6% para inodos EXT4 (sin journal) + 24 MB fijos
             local REAL_BYTES=$(sudo du -sb "$SRC_DIR" | awk '{print $1}')
-            local TARGET_BYTES=$(( (REAL_BYTES * 106 / 100 + 25165824 + 4095) / 4096 * 4096 ))
+            local TARGET_BYTES=$(( (REAL_BYTES * 105 / 100 + 20971520 + 4095) / 4096 * 4096 ))
             local INODE_COUNT=$(sudo find "$SRC_DIR" | wc -l)
-            INODE_COUNT=$(( INODE_COUNT + 2048 ))
+            INODE_COUNT=$(( INODE_COUNT + 1024 ))
 
             echo "Construyendo $OUT_IMG ($TARGET_BYTES bytes, $INODE_COUNT inodos) desde $SRC_DIR..."
 
@@ -294,4 +295,4 @@ jobs:
           gh release create hyperos4-rhode-alpha1 /mnt/work/out/super_hyperos.img.zst* \
             -R ${{ github.repository }} \
             --title "HyperOS 4 Port Alpha 1 - Moto G52 (rhode)" \
-            --notes "Ensamblado automático con services.jar parcheado, mi_ext fusionado en product (/mi_ext symlink), debloat seguro, VINTF level 5, VNDK 30, 90Hz y vendor base de rhode."
+            --notes "Ensamblado automático con services.jar parcheado, mi_ext fusionado en product (/mi_ext symlink), limpieza quirúrgica profunda, VINTF level 5, VNDK 30, 90Hz y vendor base de rhode."
