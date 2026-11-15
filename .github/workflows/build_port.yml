@@ -20,7 +20,7 @@ jobs:
           df -h /mnt/work
 
           sudo apt-get update
-          sudo apt-get install -y zstd erofs-utils e2fsprogs android-sdk-libsparse-utils simg2img p7zip-full python3 libxml2-utils
+          sudo apt-get install -y zstd erofs-utils e2fsprogs android-sdk-libsparse-utils p7zip-full python3 libxml2-utils
 
           wget -q https://github.com/LonelyFool/lpunpack_and_lpmake/releases/download/2023.09.26/lpunpack_and_lpmake-linux-x86_64.tar.gz -O /tmp/lptools.tar.gz || true
           if [ -s /tmp/lptools.tar.gz ]; then
