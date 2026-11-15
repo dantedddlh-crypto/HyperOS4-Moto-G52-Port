@@ -10,9 +10,6 @@ jobs:
   build-super:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
       - name: Preparar espacio en /mnt/work e instalar herramientas
         run: |
           sudo mkdir -p /mnt/work/{downloads,raw,extracted,images,out}
@@ -89,7 +86,7 @@ jobs:
           rm -f /mnt/work/raw/system.img /mnt/work/raw/system_ext.img /mnt/work/raw/product.img /mnt/work/raw/mi_ext.img
           df -h /mnt/work
 
-      - name: Inyectar services.jar, fusionar mi_ext, debloat quirúrgico y props de rhode
+      - name: Inyectar services.jar, fusionar mi_ext, purga CN profunda y props de rhode
         run: |
           # 1. Inyectar services.jar parcheado (Sesión 3)
           SYS_ROOT="/mnt/work/extracted/system"
@@ -115,23 +112,26 @@ jobs:
           sudo rm -rf "$SYS_ROOT/mi_ext"
           sudo ln -sf /product "$SYS_ROOT/mi_ext"
 
-          # 3. LIMPIEZA QUIRÚRGICA PROFUNDA (para recortar ~1.2 GB extra)
+          # 3. PURGA CN PROFUNDA EN PRODUCT, SYSTEM_EXT Y SYSTEM
           PROD_DIR="/mnt/work/extracted/product"
           SYSEXT_DIR="/mnt/work/extracted/system_ext"
 
-          # 3a. Eliminar precompilados oat en apps
+          # 3a. Eliminar todos los precompilados oat en apps de las 3 particiones
           sudo find "$PROD_DIR/app" "$PROD_DIR/priv-app" -type d -name "oat" -exec rm -rf {} + 2>/dev/null || true
           sudo find "$SYS_DIR/app" "$SYS_DIR/priv-app" -type d -name "oat" -exec rm -rf {} + 2>/dev/null || true
           sudo find "$SYSEXT_DIR/app" "$SYSEXT_DIR/priv-app" -type d -name "oat" -exec rm -rf {} + 2>/dev/null || true
 
-          # 3b. Eliminar data-app, modelos offline de voz (usr/srec) y pangu
-          sudo rm -rf "$PROD_DIR/data-app/"* "$PROD_DIR/usr/srec/"* "$PROD_DIR/pangu/"* 2>/dev/null || true
+          # 3b. Eliminar carpetas ocultas de preinstalación CN (pangu, data-app, cust, region, usr/srec)
+          sudo rm -rf "$PROD_DIR/data-app" "$PROD_DIR/usr/srec" "$PROD_DIR/pangu" "$PROD_DIR/cust" "$PROD_DIR/region" 2>/dev/null || true
+          sudo rm -rf "$SYSEXT_DIR/data-app" "$SYS_DIR/data-app" 2>/dev/null || true
 
-          # 3c. Eliminar fuentes pesadas chinas/asiáticas y fondos de pantalla masivos en product
-          sudo rm -rf "$PROD_DIR/media/theme/default/wallpaper/"* 2>/dev/null || true
-          sudo rm -rf "$PROD_DIR/fonts/Miui*Chinese*" "$PROD_DIR/fonts/NotoSansSC*" 2>/dev/null || true
+          # 3c. Podar multimedia pesada, ringtones extra, wallpapers y fuentes chinas gigantes
+          sudo rm -rf "$PROD_DIR/media/theme" "$PROD_DIR/media/wallpaper" "$PROD_DIR/media/audio/alarms" "$PROD_DIR/media/audio/ringtones" "$PROD_DIR/media/audio/notifications" 2>/dev/null || true
+          sudo rm -rf "$PROD_DIR/fonts/Miui*Chinese*" "$PROD_DIR/fonts/NotoSansSC*" "$SYS_DIR/fonts/NotoSansCJK*" 2>/dev/null || true
 
-          # 3d. Lista masiva de apps chinas/bloatware en product
+          # 3d. Eliminar overlays de operador y APKs chinas / bloatware en product, system y system_ext
+          sudo rm -rf "$PROD_DIR/overlay/"* 2>/dev/null || true
+
           BLOAT_APPS=(
             "MiBrowser" "MiBrowserGlobal" "MIUIBrowser"
             "MiVideo" "MIUIVideo" "MiMusic" "MIUIMusic"
@@ -149,15 +149,27 @@ jobs:
             "CIT" "XiaomiAccount" "AppStore" "Fengmi" "Duokan"
             "MiConnectService" "MiShop" "Milab" "MiCredit"
             "YouDaoEngine" "SogouInput" "BaiduIME" "PersonalAssistant"
+            "SoterServiceProvider" "UserGuide" "WpsLite" "BuiltInPrintService"
+            "Gallery" "MiuiGallery" "Weather" "MiuiWeather" "Calculator"
+            "Clock" "Notes" "MiuiNotes" "Scanner" "Compass" "ScreenRecorder"
+            "VoiceRecorder" "Screencast" "FileExplorer" "Updater" "SystemUpdater"
+            "XiaomiCloud" "MiCloudClient" "AuthService" "Stk"
+            "MiuiDaemon" "MiuiContentExtension" "VoiceAssist" "XiaoAiSpeechEngine"
+            "MiLinkService" "MiShare" "NewHome" "MIUINewHome" "ThirdAppAssistant"
+            "MiuiFrequentPhrase" "TouchAssistant" "CleanMaster" "MIUICleanMaster"
           )
           for app in "${BLOAT_APPS[@]}"; do
-            sudo rm -rf "$PROD_DIR/app/$app" "$PROD_DIR/priv-app/$app" "$SYS_DIR/app/$app" "$SYS_DIR/priv-app/$app" || true
+            sudo rm -rf "$PROD_DIR/app/$app" "$PROD_DIR/priv-app/$app" "$SYS_DIR/app/$app" "$SYS_DIR/priv-app/$app" "$SYSEXT_DIR/app/$app" "$SYSEXT_DIR/priv-app/$app" || true
           done
 
-          echo "=== Peso real de particiones tras limpieza quirúrgica ==="
+          echo "=== Peso real tras purga CN profunda ==="
           echo "System:     $(sudo du -sh "$SYS_ROOT" | awk '{print $1}')"
           echo "System_ext: $(sudo du -sh "$SYSEXT_DIR" | awk '{print $1}')"
           echo "Product:    $(sudo du -sh "$PROD_DIR" | awk '{print $1}')"
+          echo "=== Top 10 carpetas más pesadas en product ==="
+          sudo du -sh "$PROD_DIR"/* 2>/dev/null | sort -hr | head -n 10
+          echo "=== Top 10 apps más pesadas en product/app y product/priv-app ==="
+          sudo du -sh "$PROD_DIR/app"/* "$PROD_DIR/priv-app"/* 2>/dev/null | sort -hr | head -n 10
 
           # 4. Verificar VNDK 30 y matriz VINTF level 5
           if [ ! -f "$SYS_DIR/etc/vintf/compatibility_matrix.5.xml" ] && [ ! -f "$SYSEXT_DIR/etc/vintf/compatibility_matrix.5.xml" ]; then
@@ -204,10 +216,11 @@ jobs:
             local OUT_IMG="$2"
             local MNT_POINT="$3"
 
+            # Margen ajustado (2% + 8 MB) ya que las particiones son readonly en super
             local REAL_BYTES=$(sudo du -sb "$SRC_DIR" | awk '{print $1}')
-            local TARGET_BYTES=$(( (REAL_BYTES * 105 / 100 + 20971520 + 4095) / 4096 * 4096 ))
+            local TARGET_BYTES=$(( (REAL_BYTES * 102 / 100 + 8388608 + 4095) / 4096 * 4096 ))
             local INODE_COUNT=$(sudo find "$SRC_DIR" | wc -l)
-            INODE_COUNT=$(( INODE_COUNT + 1024 ))
+            INODE_COUNT=$(( INODE_COUNT + 512 ))
 
             echo "Construyendo $OUT_IMG ($TARGET_BYTES bytes, $INODE_COUNT inodos) desde $SRC_DIR..."
 
@@ -295,4 +308,4 @@ jobs:
           gh release create hyperos4-rhode-alpha1 /mnt/work/out/super_hyperos.img.zst* \
             -R ${{ github.repository }} \
             --title "HyperOS 4 Port Alpha 1 - Moto G52 (rhode)" \
-            --notes "Ensamblado automático con services.jar parcheado, mi_ext fusionado en product (/mi_ext symlink), limpieza quirúrgica profunda, VINTF level 5, VNDK 30, 90Hz y vendor base de rhode."
+            --notes "Ensamblado automático con purga CN profunda, margen EXT4 optimizado, services.jar parcheado, mi_ext fusionado en product (/mi_ext symlink), VINTF level 5, VNDK 30, 90Hz y vendor base de rhode."
