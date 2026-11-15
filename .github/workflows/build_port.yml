@@ -115,15 +115,19 @@ jobs:
           sudo rm -rf "$SYS_ROOT/mi_ext"
           sudo ln -sf /product "$SYS_ROOT/mi_ext"
 
-          # 3. DEBLOAT SEGURO en product (para ajustar super <= 7.58 GB)
+          # 3. DEBLOAT SEGURO en product, system y system_ext (para ajustar super <= 7.58 GB)
           PROD_DIR="/mnt/work/extracted/product"
+          SYSEXT_DIR="/mnt/work/extracted/system_ext"
           echo "Tamaño de product ANTES de debloat: $(sudo du -sh "$PROD_DIR" | awk '{print $1}')"
 
-          # 3a. Eliminar precompilados oat/odex/vdex dentro de product/app y product/priv-app (Android los regenera en /data)
+          # 3a. Eliminar precompilados oat en apps de product, system y system_ext (Android los regenera en /data)
           sudo find "$PROD_DIR/app" "$PROD_DIR/priv-app" -type d -name "oat" -exec rm -rf {} + 2>/dev/null || true
+          sudo find "$SYS_DIR/app" "$SYS_DIR/priv-app" -type d -name "oat" -exec rm -rf {} + 2>/dev/null || true
+          sudo find "$SYSEXT_DIR/app" "$SYSEXT_DIR/priv-app" -type d -name "oat" -exec rm -rf {} + 2>/dev/null || true
 
-          # 3b. Eliminar data-app (apps preinstaladas de usuario/terceros)
+          # 3b. Eliminar data-app y modelos pesados offline de voz (usr/srec)
           sudo rm -rf "$PROD_DIR/data-app/"* || true
+          sudo rm -rf "$PROD_DIR/usr/srec/"* || true
 
           # 3c. Eliminar APKs pesados prescindibles (instalables desde Play Store)
           BLOAT_APPS=(
@@ -145,10 +149,12 @@ jobs:
             sudo rm -rf "$PROD_DIR/app/$app" "$PROD_DIR/priv-app/$app" || true
           done
 
-          echo "Tamaño de product DESPUÉS de debloat: $(sudo du -sh "$PROD_DIR" | awk '{print $1}')"
+          echo "Tamaño de system DESPUÉS:     $(sudo du -sh "$SYS_ROOT" | awk '{print $1}')"
+          echo "Tamaño de system_ext DESPUÉS: $(sudo du -sh "$SYSEXT_DIR" | awk '{print $1}')"
+          echo "Tamaño de product DESPUÉS:    $(sudo du -sh "$PROD_DIR" | awk '{print $1}')"
 
           # 4. Verificar VNDK 30 y matriz VINTF level 5
-          if [ ! -f "$SYS_DIR/etc/vintf/compatibility_matrix.5.xml" ] && [ ! -f "/mnt/work/extracted/system_ext/etc/vintf/compatibility_matrix.5.xml" ]; then
+          if [ ! -f "$SYS_DIR/etc/vintf/compatibility_matrix.5.xml" ] && [ ! -f "$SYSEXT_DIR/etc/vintf/compatibility_matrix.5.xml" ]; then
             echo "Creando compatibility_matrix.5.xml mínimo para vendor FCM 5..."
             sudo tee "$SYS_DIR/etc/vintf/compatibility_matrix.5.xml" > /dev/null << 'EOF'
           <compatibility-matrix version="1.0" type="framework" level="5">
@@ -192,18 +198,19 @@ jobs:
             local OUT_IMG="$2"
             local MNT_POINT="$3"
 
-            local SIZE_MB=$(sudo du -sm "$SRC_DIR" | awk '{print $1 + 140}')
-            echo "Construyendo $OUT_IMG (${SIZE_MB}M) desde $SRC_DIR..."
+            # Dar +600 MB holgados para la copia inicial y luego compactar al mínimo real con resize2fs -M
+            local SIZE_MB=$(sudo du -sm "$SRC_DIR" | awk '{print $1 + 600}')
+            echo "Construyendo $OUT_IMG (${SIZE_MB}M iniciales) desde $SRC_DIR..."
 
             truncate -s "${SIZE_MB}M" "$OUT_IMG"
-            mkfs.ext4 -F -L "$MNT_POINT" "$OUT_IMG"
+            mkfs.ext4 -F -m 0 -O ^has_journal -L "$MNT_POINT" "$OUT_IMG"
             mkdir -p /mnt/work/build_mnt
             sudo mount -o loop "$OUT_IMG" /mnt/work/build_mnt
             sudo cp -a "$SRC_DIR/." /mnt/work/build_mnt/
             sudo umount /mnt/work/build_mnt
             e2fsck -fy "$OUT_IMG" || true
             resize2fs -M "$OUT_IMG"
-            # Añadir solo 16 MB de margen (las particiones son readonly en super)
+            # Añadir 16 MB de margen tras compactar
             local FINAL_BYTES=$(stat -c%s "$OUT_IMG")
             local PADDED_BYTES=$(( (FINAL_BYTES + 16777216 + 4095) / 4096 * 4096 ))
             truncate -s "$PADDED_BYTES" "$OUT_IMG"
