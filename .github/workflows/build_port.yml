@@ -19,12 +19,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y zstd erofs-utils e2fsprogs android-sdk-libsparse-utils p7zip-full python3 libxml2-utils git clang lld build-essential zlib1g-dev libssl-dev
 
-          # Compilar lpmake parching #include <algorithm> para GCC 14 / Clang moderno
           if ! command -v lpmake &> /dev/null; then
             echo "Clonando y compilando lpmake..."
             git clone --depth=1 https://github.com/LonelyFool/lpunpack_and_lpmake.git /tmp/lptools_src
             cd /tmp/lptools_src
-            sed -i '1i #include <algorithm>' liblp/utility.cpp
+            find . -name "utility.cpp" -exec sed -i '1i #include <algorithm>' {} +
             chmod +x make.sh
             ./make.sh
             sudo install -m 0755 bin/lpmake /usr/local/bin/lpmake
@@ -72,11 +71,11 @@ jobs:
             local IMG_PATH="$1"
             local OUT_DIR="$2"
             mkdir -p "$OUT_DIR"
-            if blkid "$IMG_PATH" | grep -qi "erofs" || file "$IMG_PATH" | grep -qi "EROFS"; then
-              echo "Extrayendo EROFS: $IMG_PATH -> $OUT_DIR"
+            if blkid "$IMG_PATH" \vert{} grep -qi "erofs" \vert{}\vert{} file "$IMG_PATH" | grep -qi "EROFS"; then
+              echo "Extrayendo EROFS: $IMG_PATH ->$OUT_DIR"
               sudo fsck.erofs --extract="$OUT_DIR" "$IMG_PATH"
             else
-              echo "Montando y copiando EXT4: $IMG_PATH -> $OUT_DIR"
+              echo "Montando y copiando EXT4: $IMG_PATH ->$OUT_DIR"
               mkdir -p /mnt/work/tmp_mnt
               sudo mount -o ro,loop "$IMG_PATH" /mnt/work/tmp_mnt
               sudo cp -a /mnt/work/tmp_mnt/. "$OUT_DIR/"
@@ -170,164 +169,4 @@ jobs:
             "MIUIQuickSearchBox" "MiuiScanner" "TranslationService" "AiEngine"
             "CarWith" "ICar" "MiAuto" "SmartHome" "MiHome"
           )
-          for app in "${BLOAT_APPS[@]}"; do
-            sudo rm -rf "$PROD_DIR/app/$app" "$PROD_DIR/priv-app/$app" "$SYS_DIR/app/$app" "$SYS_DIR/priv-app/$app" "$SYSEXT_DIR/app/$app" "$SYSEXT_DIR/priv-app/$app" || true
-          done
-
-          # 3e. Eliminar automáticamente cualquier app no crítica > 30 MB en product/app o product/priv-app
-          for dir in "$PROD_DIR/app"/* "$PROD_DIR/priv-app"/*; do
-            if [ -d "$dir" ]; then
-              APP_NAME=$(basename "$dir")
-              case "$APP_NAME" in
-                *SystemUI*|*Settings*|*MiuiHome*|*Launcher*|*SecurityCenter*|*Camera*|*TeleService*|*Contacts*|*Mms*|*PackageInstaller*|*LatinIME*)
-                  ;;
-                *)
-                  SIZE_KB=$(sudo du -sk "$dir" | awk '{print $1}')
-                  if [ "$SIZE_KB" -gt 30720 ]; then
-                    echo "Eliminando app pesada no crítica ($SIZE_KB KB): $APP_NAME"
-                    sudo rm -rf "$dir"
-                  fi
-                  ;;
-              esac
-            fi
-          done
-
-          echo "=== Peso real tras purga final ==="
-          echo "System:     $(sudo du -sh "$SYS_ROOT" | awk '{print $1}')"
-          echo "System_ext: $(sudo du -sh "$SYSEXT_DIR" | awk '{print $1}')"
-          echo "Product:    $(sudo du -sh "$PROD_DIR" | awk '{print $1}')"
-
-          # 4. Verificar VNDK 30 y matriz VINTF level 5
-          if [ ! -f "$SYS_DIR/etc/vintf/compatibility_matrix.5.xml" ] && [ ! -f "$SYSEXT_DIR/etc/vintf/compatibility_matrix.5.xml" ]; then
-            echo "Creando compatibility_matrix.5.xml mínimo para vendor FCM 5..."
-            sudo tee "$SYS_DIR/etc/vintf/compatibility_matrix.5.xml" > /dev/null << 'EOF'
-          <compatibility-matrix version="1.0" type="framework" level="5">
-              <sepolicy>
-                  <kernel-sepolicy-version>30</kernel-sepolicy-version>
-                  <sepolicy-version>30.0</sepolicy-version>
-              </sepolicy>
-          </compatibility-matrix>
-          EOF
-            sudo chmod 0644 "$SYS_DIR/etc/vintf/compatibility_matrix.5.xml"
-            sudo chown root:root "$SYS_DIR/etc/vintf/compatibility_matrix.5.xml"
-          fi
-
-          # 5. Ajustar build.prop de system y product para Moto G52 (rhode)
-          SYS_PROP="$SYS_DIR/build.prop"
-          PROD_PROP="$PROD_DIR/etc/build.prop"
-          [ ! -f "$PROD_PROP" ] && PROD_PROP="$PROD_DIR/build.prop"
-
-          for P in "$SYS_PROP" "$PROD_PROP"; do
-            if [ -f "$P" ]; then
-              echo "Parcheando $P..."
-              sudo sed -i 's/sapphiren/rhode/g' "$P"
-              sudo sed -i '/^ro.sf.lcd_density=/d' "$P"
-              sudo sed -i '/^ro.surface_flinger.use_smart_90_for_video=/d' "$P"
-              sudo sed -i '/^ro.hardware.fp.fod=/d' "$P"
-              sudo sed -i '/^ro.vendor.dolby.dax.version=/d' "$P"
-              echo "" | sudo tee -a "$P" > /dev/null
-              echo "# Moto G52 (rhode) Port Adjustments" | sudo tee -a "$P" > /dev/null
-              echo "ro.sf.lcd_density=400" | sudo tee -a "$P" > /dev/null
-              echo "ro.surface_flinger.use_smart_90_for_video=true" | sudo tee -a "$P" > /dev/null
-              echo "ro.hardware.fp.fod=false" | sudo tee -a "$P" > /dev/null
-              echo "ro.product.model=moto g52" | sudo tee -a "$P" > /dev/null
-              echo "ro.product.device=rhode" | sudo tee -a "$P" > /dev/null
-            fi
-          done
-
-      - name: Reconstruir particiones EXT4 optimizadas
-        run: |
-          build_ext4() {
-            local SRC_DIR="$1"
-            local OUT_IMG="$2"
-            local MNT_POINT="$3"
-
-            local REAL_BYTES=$(sudo du -sb "$SRC_DIR" | awk '{print $1}')
-            local TARGET_BYTES=$(( (REAL_BYTES + 50331648 + 4095) / 4096 * 4096 ))
-            local INODE_COUNT=$(sudo find "$SRC_DIR" | wc -l)
-            INODE_COUNT=$(( INODE_COUNT + 512 ))
-
-            echo "Construyendo $OUT_IMG ($TARGET_BYTES bytes iniciales, $INODE_COUNT inodos) desde $SRC_DIR..."
-
-            truncate -s "$TARGET_BYTES" "$OUT_IMG"
-            sudo mkfs.ext4 -F -m 0 -N "$INODE_COUNT" -O ^has_journal -L "$MNT_POINT" -d "$SRC_DIR" "$OUT_IMG"
-            e2fsck -fy "$OUT_IMG" || true
-            resize2fs -M "$OUT_IMG"
-            sudo rm -rf "$SRC_DIR"
-          }
-
-          build_ext4 /mnt/work/extracted/system /mnt/work/images/system_a.img system
-          build_ext4 /mnt/work/extracted/system_ext /mnt/work/images/system_ext_a.img system_ext
-          build_ext4 /mnt/work/extracted/product /mnt/work/images/product_a.img product
-          mv /mnt/work/raw/vendor_rhode_base.img /mnt/work/images/vendor_a.img
-
-          ls -lh /mnt/work/images
-
-      - name: Ensamblar super_hyperos.img con lpmake (7583301632 bytes)
-        run: |
-          cd /mnt/work/images
-          SYS_SIZE=$(stat -c%s system_a.img)
-          SYSEXT_SIZE=$(stat -c%s system_ext_a.img)
-          PROD_SIZE=$(stat -c%s product_a.img)
-          VEND_SIZE=$(stat -c%s vendor_a.img)
-          TOTAL_PARTS=$((SYS_SIZE + SYSEXT_SIZE + PROD_SIZE + VEND_SIZE))
-          SUPER_MAX=7583301632
-
-          echo "System:     $SYS_SIZE"
-          echo "System_ext: $SYSEXT_SIZE"
-          echo "Product:    $PROD_SIZE"
-          echo "Vendor:     $VEND_SIZE"
-          echo "Suma total: $TOTAL_PARTS / Max permitido: $SUPER_MAX"
-
-          if [ "$TOTAL_PARTS" -ge $((SUPER_MAX - 10485760)) ]; then
-            echo "ERROR: La suma de particiones excede el tamaño de super de rhode!"
-            exit 1
-          fi
-
-          lpmake \
-            --metadata-size 65536 \
-            --super-name super \
-            --metadata-slots 3 \
-            --virtual-ab \
-            --device super:${SUPER_MAX} \
-            --group moto_dynamic_partitions_a:${SUPER_MAX} \
-            --group moto_dynamic_partitions_b:${SUPER_MAX} \
-            --partition system_a:readonly:${SYS_SIZE}:moto_dynamic_partitions_a \
-            --image system_a=system_a.img \
-            --partition system_b:readonly:0:moto_dynamic_partitions_b \
-            --partition system_ext_a:readonly:${SYSEXT_SIZE}:moto_dynamic_partitions_a \
-            --image system_ext_a=system_ext_a.img \
-            --partition system_ext_b:readonly:0:moto_dynamic_partitions_b \
-            --partition product_a:readonly:${PROD_SIZE}:moto_dynamic_partitions_a \
-            --image product_a=product_a.img \
-            --partition product_b:readonly:0:moto_dynamic_partitions_b \
-            --partition vendor_a:readonly:${VEND_SIZE}:moto_dynamic_partitions_a \
-            --image vendor_a=vendor_a.img \
-            --partition vendor_b:readonly:0:moto_dynamic_partitions_b \
-            --sparse \
-            --output /mnt/work/out/super_hyperos.img
-
-          rm -f /mnt/work/images/*.img
-          ls -lh /mnt/work/out/super_hyperos.img
-
-      - name: Comprimir super_hyperos.img y publicar Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          cd /mnt/work/out
-          zstd -T0 -6 super_hyperos.img -o super_hyperos.img.zst
-          rm -f super_hyperos.img
-          ls -lh super_hyperos.img.zst
-
-          FILE_SIZE=$(stat -c%s super_hyperos.img.zst)
-          if [ "$FILE_SIZE" -gt 2040109465 ]; then
-            echo "Dividiendo super_hyperos.img.zst para cumplir límite de 2 GB de GitHub..."
-            split -b 1900M super_hyperos.img.zst super_hyperos.img.zst.part_
-            rm -f super_hyperos.img.zst
-          fi
-
-          gh release delete hyperos4-rhode-alpha1 -R ${{ github.repository }} -y || true
-          gh release create hyperos4-rhode-alpha1 /mnt/work/out/super_hyperos.img.zst* \
-            -R ${{ github.repository }} \
-            --title "HyperOS 4 Port Alpha 1 - Moto G52 (rhode)" \
-            --notes "Ensamblado automático con mkfs.ext4 -d compactado, purga final CN, services.jar parcheado, mi_ext fusionado en product (/mi_ext symlink), VINTF level 5, VNDK 30, 90Hz y vendor base de rhode."
+          for
