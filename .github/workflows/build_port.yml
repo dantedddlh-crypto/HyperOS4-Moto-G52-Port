@@ -34,13 +34,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          cd /mnt/work/downloads
-          gh release download base-rhode-vendor -p "vendor_rhode_base.img.zst"
-          gh release download patched-jars -p "services.jar"
-          gh release download donor-hyperos4-base -p "system.img.zst"
-          gh release download donor-hyperos4-base -p "system_ext.img.zst"
-          gh release download donor-hyperos4-base -p "mi_ext.img.zst"
-          gh release download donor-hyperos4-base -p "product.img.zst.part_*"
+          gh release download base-rhode-vendor -R ${{ github.repository }} -p "vendor_rhode_base.img.zst" -D /mnt/work/downloads
+          gh release download patched-jars -R ${{ github.repository }} -p "services.jar" -D /mnt/work/downloads
+          gh release download donor-hyperos4-base -R ${{ github.repository }} -p "system.img.zst" -D /mnt/work/downloads
+          gh release download donor-hyperos4-base -R ${{ github.repository }} -p "system_ext.img.zst" -D /mnt/work/downloads
+          gh release download donor-hyperos4-base -R ${{ github.repository }} -p "mi_ext.img.zst" -D /mnt/work/downloads
+          gh release download donor-hyperos4-base -R ${{ github.repository }} -p "product.img.zst.part_*" -D /mnt/work/downloads
           ls -lh /mnt/work/downloads
 
       - name: Unir y descomprimir imágenes base en /mnt/work/raw
@@ -122,7 +121,6 @@ jobs:
           echo "=== Verificando matrices VINTF en system y system_ext ==="
           ls -la "$SYS_DIR/etc/vintf/" /mnt/work/extracted/system_ext/etc/vintf/ || true
 
-          # Si no existe compatibility_matrix.5.xml en system/etc/vintf, crear enlace/copia mínima compatible
           if [ ! -f "$SYS_DIR/etc/vintf/compatibility_matrix.5.xml" ] && [ ! -f "/mnt/work/extracted/system_ext/etc/vintf/compatibility_matrix.5.xml" ]; then
             echo "Creando compatibility_matrix.5.xml mínimo para vendor FCM 5..."
             sudo tee "$SYS_DIR/etc/vintf/compatibility_matrix.5.xml" > /dev/null << 'EOF'
@@ -255,7 +253,8 @@ jobs:
             rm -f super_hyperos.img.zst
           fi
 
-          gh release delete hyperos4-rhode-alpha1 -y || true
+          gh release delete hyperos4-rhode-alpha1 -R ${{ github.repository }} -y || true
           gh release create hyperos4-rhode-alpha1 /mnt/work/out/super_hyperos.img.zst* \
+            -R ${{ github.repository }} \
             --title "HyperOS 4 Port Alpha 1 - Moto G52 (rhode)" \
             --notes "Ensamblado automático con services.jar parcheado, mi_ext fusionado en product (/mi_ext symlink), VINTF level 5, VNDK 30, 90Hz y vendor base de rhode."
