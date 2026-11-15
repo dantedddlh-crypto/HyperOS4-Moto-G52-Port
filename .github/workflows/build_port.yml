@@ -17,18 +17,27 @@ jobs:
           df -h /mnt/work
 
           sudo apt-get update
-          sudo apt-get install -y zstd erofs-utils e2fsprogs android-sdk-libsparse-utils p7zip-full python3 libxml2-utils lpmake || true
+          sudo apt-get install -y zstd erofs-utils e2fsprogs android-sdk-libsparse-utils p7zip-full python3 libxml2-utils git cmake build-essential zlib1g-dev libssl-dev
 
+          # Obtener o compilar lpmake si no está en el sistema
           if ! command -v lpmake &> /dev/null; then
-            echo "Descargando lpmake precompilado..."
-            wget -q https://github.com/affggh/lpmake_and_lpunpack/releases/download/v1.0/lpmake -O /tmp/lpmake || true
-            if [ ! -s /tmp/lpmake ]; then
-              wget -q https://raw.githubusercontent.com/sebaubuntu/otatools/master/bin/lpmake -O /tmp/lpmake
+            echo "Buscando o compilando lpmake..."
+            git clone --depth=1 https://github.com/LonelyFool/lpunpack_and_lpmake.git /tmp/lptools_src || true
+            if [ -d "/tmp/lptools_src" ]; then
+              cd /tmp/lptools_src
+              chmod +x make.sh || true
+              ./make.sh || g++ -std=c++17 -O2 -Iinclude -D_FILE_OFFSET_BITS=64 src/*.cpp -lz -lcrypto -lpthread -o /tmp/lpmake || true
             fi
-            sudo install -m 0755 /tmp/lpmake /usr/local/bin/lpmake
+            if [ -f "/tmp/lptools_src/bin/lpmake" ]; then
+              sudo install -m 0755 /tmp/lptools_src/bin/lpmake /usr/local/bin/lpmake
+            elif [ -f "/tmp/lpmake" ]; then
+              sudo install -m 0755 /tmp/lpmake /usr/local/bin/lpmake
+            fi
           fi
+
+          which lpmake
           lpmake --help | head -n 5
-          
+
       - name: Descargar Releases (base-rhode-vendor, donor-hyperos4-base, patched-jars)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -238,7 +247,6 @@ jobs:
             local OUT_IMG="$2"
             local MNT_POINT="$3"
 
-            # Usar mkfs.ext4 -d con +48 MB de margen para metadatos EXT4 y luego compactar con resize2fs -M
             local REAL_BYTES=$(sudo du -sb "$SRC_DIR" | awk '{print $1}')
             local TARGET_BYTES=$(( (REAL_BYTES + 50331648 + 4095) / 4096 * 4096 ))
             local INODE_COUNT=$(sudo find "$SRC_DIR" | wc -l)
