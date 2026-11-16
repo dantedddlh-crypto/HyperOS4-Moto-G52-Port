@@ -1,0 +1,170 @@
+name: Extract SELinux 30.0 Mappings from EvoX
+
+on:
+  workflow_dispatch:
+    inputs:
+      pixeldrain_url:
+        description: 'Enlace directo de Pixeldrain del ZIP de Evolution X'
+        required: true
+        default: 'https://pixeldrain.com/api/file/Mid9SmHh'
+
+permissions:
+  contents: write
+
+jobs:
+  extract-selinux-mappings:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repositorio
+        uses: actions/checkout@v4
+
+      - name: Instalar herramientas
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y erofs-utils unzip curl jq
+
+          PDG_URL=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/ssut/payload-dumper-go/releases/latest \
+            | jq -r '[.assets[] | select(.name | test("linux_amd64\\.tar\\.gz$"))][0].browser_download_url')
+          if [ -z "$PDG_URL" ] || [ "$PDG_URL" = "null" ]; then
+            echo "::error::No se encontró el release de payload-dumper-go para linux_amd64"
+            exit 1
+          fi
+
+          mkdir -p /tmp/pdg
+          curl -fL --retry 5 "$PDG_URL" -o /tmp/pdg.tar.gz
+          tar -xzf /tmp/pdg.tar.gz -C /tmp/pdg
+          PDG_BIN=$(find /tmp/pdg -type f -name 'payload-dumper-go' | head -n1)
+          sudo install -m 755 "$PDG_BIN" /usr/local/bin/payload-dumper-go
+          payload-dumper-go -h >/dev/null 2>&1 || true
+
+          echo "Herramientas listas. Versión de erofs-utils:"
+          dpkg -s erofs-utils | grep -i '^Version'
+          df -h /
+
+      - name: Descargar ZIP de Evolution X y extraer payload.bin
+        env:
+          EVOX_URL: ${{ github.event.inputs.pixeldrain_url }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/evox_work
+          cd /tmp/evox_work
+
+          curl -fL --retry 5 --retry-all-errors --retry-delay 5 -C - \
+            "$EVOX_URL" -o evox.zip
+
+          echo "Tamaño del ZIP: $(du -h evox.zip | cut -f1)"
+          if ! unzip -l evox.zip | grep -q 'payload.bin'; then
+            echo "::error::El archivo descargado no contiene payload.bin (¿enlace roto o ZIP distinto?)"
+            unzip -l evox.zip | head -30 || head -c 300 evox.zip
+            exit 1
+          fi
+
+          unzip -p evox.zip payload.bin > payload.bin
+          rm -f evox.zip
+          df -h /
+
+      - name: Extraer system.img
+        run: |
+          set -euo pipefail
+          cd /tmp/evox_work
+          payload-dumper-go -p system -o extracted payload.bin
+          rm -f payload.bin
+
+          SYS_IMG=$(find extracted -type f -name 'system.img' | head -n1)
+          if [ -z "$SYS_IMG" ]; then
+            echo "::error::payload-dumper-go no produjo system.img"
+            ls -laR extracted || true
+            exit 1
+          fi
+          echo "SYS_IMG=/tmp/evox_work/$SYS_IMG" >> "$GITHUB_ENV"
+          ls -lh "$SYS_IMG"
+
+      - name: Obtener carpeta selinux de Evolution X
+        run: |
+          set -uo pipefail
+          cd /tmp/evox_work
+          mkdir -p mnt_sys sys_out "$GITHUB_WORKSPACE/artifacts_out"
+
+          ROOT=""
+          # Intento 1: montar (autodetecta EROFS o EXT4)
+          if sudo mount -o ro,loop "$SYS_IMG" mnt_sys 2>/tmp/mount_err.txt; then
+            echo "Montado con loop"
+            ROOT=mnt_sys
+          else
+            echo "Mount falló:"; cat /tmp/mount_err.txt
+            # Intento 2: extraer con fsck.erofs (por si el kernel no soporta la compresión)
+            if fsck.erofs --extract=sys_out "$SYS_IMG"; then
+              echo "Extraído con fsck.erofs"
+              ROOT=sys_out
+            fi
+          fi
+
+          if [ -z "$ROOT" ]; then
+            echo "::error::No se pudo leer system.img ni con mount ni con fsck.erofs"
+            exit 1
+          fi
+
+          MAP_DIR=$(find "$ROOT" -maxdepth 5 -type d -path '*/etc/selinux/mapping' | head -n1)
+          if [ -z "$MAP_DIR" ]; then
+            echo "::error::No existe etc/selinux/mapping en este system.img"
+            exit 1
+          fi
+          SEL_DIR=$(dirname "$MAP_DIR")
+
+          echo "=== Contenido de mapping/ en Evolution X ==="
+          ls -la "$MAP_DIR" | tee "$GITHUB_WORKSPACE/artifacts_out/mapping_listing.txt"
+
+          # Guardar toda la carpeta selinux como referencia (para pruebas con secilc)
+          sudo cp -r "$SEL_DIR" "$GITHUB_WORKSPACE/artifacts_out/selinux_evox"
+          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE/artifacts_out"
+
+          mkdir -p "$GITHUB_WORKSPACE/patches/selinux"
+          FOUND=false
+          if [ -f "$MAP_DIR/30.0.cil" ]; then
+            cp -v "$MAP_DIR/30.0.cil" "$GITHUB_WORKSPACE/patches/selinux/"
+            FOUND=true
+          fi
+          if [ -f "$MAP_DIR/30.0.compat.cil" ]; then
+            cp -v "$MAP_DIR/30.0.compat.cil" "$GITHUB_WORKSPACE/patches/selinux/"
+          else
+            echo "::warning::No hay 30.0.compat.cil (es opcional para init)"
+          fi
+
+          echo "FOUND_30=$FOUND" >> "$GITHUB_ENV"
+          sudo umount mnt_sys 2>/dev/null || true
+
+      - name: Subir listado y carpeta selinux como artefacto
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evox-selinux
+          path: artifacts_out/
+          if-no-files-found: warn
+
+      - name: Verificar que 30.0.cil existe
+        run: |
+          if [ "${FOUND_30:-false}" != "true" ]; then
+            echo "::error::Evolution X NO trae mapping/30.0.cil. Revisa el artefacto 'evox-selinux' (mapping_listing.txt). Si falta, su vendor/política no coincide con el que asumías."
+            exit 1
+          fi
+
+      - name: Guardar archivos .cil en el repositorio
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f patches/selinux/30.0.cil
+          [ -f patches/selinux/30.0.compat.cil ] && git add -f patches/selinux/30.0.compat.cil
+          if git diff --staged --quiet; then
+            echo "Sin cambios en los archivos .cil"
+          else
+            git commit -m "chore(selinux): agregar mapping 30.0 desde Evolution X"
+            git pull --rebase origin "${GITHUB_REF_NAME}"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
