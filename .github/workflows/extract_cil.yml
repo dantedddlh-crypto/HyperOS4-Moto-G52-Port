@@ -87,19 +87,17 @@ jobs:
 
       - name: Obtener carpeta selinux de Evolution X
         run: |
-          set -uo pipefail
+          set -u
           cd /tmp/evox_work
           mkdir -p mnt_sys sys_out "$GITHUB_WORKSPACE/artifacts_out"
 
           ROOT=""
-          # Intento 1: montar (autodetecta EROFS o EXT4)
           if sudo mount -o ro,loop "$SYS_IMG" mnt_sys 2>/tmp/mount_err.txt; then
             echo "Montado con loop"
             ROOT=mnt_sys
           else
             echo "Mount falló:"; cat /tmp/mount_err.txt
-            # Intento 2: extraer con fsck.erofs (por si el kernel no soporta la compresión)
-            if fsck.erofs --extract=sys_out "$SYS_IMG"; then
+            if sudo fsck.erofs --extract=sys_out "$SYS_IMG"; then
               echo "Extraído con fsck.erofs"
               ROOT=sys_out
             fi
@@ -110,31 +108,39 @@ jobs:
             exit 1
           fi
 
-          MAP_DIR=$(find "$ROOT" -maxdepth 5 -type d -path '*/etc/selinux/mapping' | head -n1)
-          if [ -z "$MAP_DIR" ]; then
+          echo "=== Raíz del system montado ==="
+          sudo ls "$ROOT" | head -30
+
+          # Rutas habituales: system-as-root (system/etc) o raíz directa (etc)
+          SEL_DIR=""
+          for cand in "$ROOT/system/etc/selinux" "$ROOT/etc/selinux"; do
+            if sudo test -d "$cand/mapping"; then SEL_DIR="$cand"; break; fi
+          done
+
+          if [ -z "$SEL_DIR" ]; then
             echo "::error::No existe etc/selinux/mapping en este system.img"
             exit 1
           fi
-          SEL_DIR=$(dirname "$MAP_DIR")
+          MAP_DIR="$SEL_DIR/mapping"
 
           echo "=== Contenido de mapping/ en Evolution X ==="
-          ls -la "$MAP_DIR" | tee "$GITHUB_WORKSPACE/artifacts_out/mapping_listing.txt"
+          sudo ls -la "$MAP_DIR" | tee "$GITHUB_WORKSPACE/artifacts_out/mapping_listing.txt"
 
-          # Guardar toda la carpeta selinux como referencia (para pruebas con secilc)
           sudo cp -r "$SEL_DIR" "$GITHUB_WORKSPACE/artifacts_out/selinux_evox"
-          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE/artifacts_out"
 
           mkdir -p "$GITHUB_WORKSPACE/patches/selinux"
           FOUND=false
-          if [ -f "$MAP_DIR/30.0.cil" ]; then
-            cp -v "$MAP_DIR/30.0.cil" "$GITHUB_WORKSPACE/patches/selinux/"
+          if sudo test -f "$MAP_DIR/30.0.cil"; then
+            sudo cp -v "$MAP_DIR/30.0.cil" "$GITHUB_WORKSPACE/patches/selinux/"
             FOUND=true
           fi
-          if [ -f "$MAP_DIR/30.0.compat.cil" ]; then
-            cp -v "$MAP_DIR/30.0.compat.cil" "$GITHUB_WORKSPACE/patches/selinux/"
+          if sudo test -f "$MAP_DIR/30.0.compat.cil"; then
+            sudo cp -v "$MAP_DIR/30.0.compat.cil" "$GITHUB_WORKSPACE/patches/selinux/"
           else
             echo "::warning::No hay 30.0.compat.cil (es opcional para init)"
           fi
+
+          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE/artifacts_out" "$GITHUB_WORKSPACE/patches"
 
           echo "FOUND_30=$FOUND" >> "$GITHUB_ENV"
           sudo umount mnt_sys 2>/dev/null || true
