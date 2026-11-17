@@ -1,0 +1,145 @@
+name: Extract Evolution X assets from Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_tag:
+        description: 'Tag del Release con los trozos del ZIP'
+        required: true
+        default: 'evox-source'
+      output_tag:
+        description: 'Tag del Release donde se publican las imágenes extraídas'
+        required: true
+        default: 'evox-extracted'
+      expected_sha256:
+        description: 'SHA256 esperado del ZIP completo'
+        required: true
+        default: '4d557f91b67c637dd8368fc5c64738c68eec3c96e0098e87d4a0bc6a529b7cdb'
+
+permissions:
+  contents: write
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+      SRC_TAG: ${{ github.event.inputs.source_tag }}
+      OUT_TAG: ${{ github.event.inputs.output_tag }}
+      EXPECTED_SHA: ${{ github.event.inputs.expected_sha256 }}
+
+    steps:
+      - name: Instalar herramientas
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y zstd unzip curl jq erofs-utils
+
+          PDG_URL=$(curl -fsSL -H "Authorization: Bearer $GH_TOKEN" \
+            https://api.github.com/repos/ssut/payload-dumper-go/releases/latest \
+            | jq -r '[.assets[] | select(.name | test("linux_amd64\\.tar\\.gz$"))][0].browser_download_url')
+          if [ -z "$PDG_URL" ] || [ "$PDG_URL" = "null" ]; then
+            echo "::error::No se encontró payload-dumper-go para linux_amd64"; exit 1
+          fi
+          mkdir -p /tmp/pdg
+          curl -fL --retry 5 "$PDG_URL" -o /tmp/pdg.tar.gz
+          tar -xzf /tmp/pdg.tar.gz -C /tmp/pdg
+          PDG_BIN=$(find /tmp/pdg -type f -name 'payload-dumper-go' | head -n1)
+          sudo install -m 755 "$PDG_BIN" /usr/local/bin/payload-dumper-go
+          df -h /
+
+      - name: Descargar trozos desde el Release
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/work && cd /tmp/work
+          gh release download "$SRC_TAG" --repo "$GITHUB_REPOSITORY" \
+            -p 'evolutionx_rhode.zip.part_*' --dir parts
+          ls -lh parts/
+
+      - name: Unir y verificar SHA256
+        run: |
+          set -euo pipefail
+          cd /tmp/work
+          cat parts/evolutionx_rhode.zip.part_* > evolutionx_rhode.zip
+          rm -rf parts
+          ls -lh evolutionx_rhode.zip
+
+          ACTUAL=$(sha256sum evolutionx_rhode.zip | cut -d' ' -f1)
+          echo "Esperado: $EXPECTED_SHA"
+          echo "Obtenido: $ACTUAL"
+          if [ "${ACTUAL,,}" != "${EXPECTED_SHA,,}" ]; then
+            echo "::error::SHA256 no coincide. Revisa que subiste todos los trozos, en orden y sin corrupción."
+            exit 1
+          fi
+          unzip -tq evolutionx_rhode.zip
+          unzip -l evolutionx_rhode.zip | grep -q 'payload.bin'
+
+      - name: Extraer imágenes del payload
+        run: |
+          set -euo pipefail
+          cd /tmp/work
+          unzip -p evolutionx_rhode.zip payload.bin > payload.bin
+          rm -f evolutionx_rhode.zip
+          payload-dumper-go -p vendor,boot,vendor_boot,dtbo,vbmeta,vbmeta_system -o extracted payload.bin > /dev/null
+          rm -f payload.bin
+          find extracted -type f -name '*.img' -exec ls -lh {} \;
+
+      - name: Comprimir imágenes
+        run: |
+          set -euo pipefail
+          cd /tmp/work
+          mkdir -p release_out
+          for img in vendor boot vendor_boot dtbo vbmeta vbmeta_system; do
+            F=$(find extracted -type f -name "$img.img" | head -n1)
+            if [ -z "$F" ]; then
+              echo "::warning::No se obtuvo $img.img"; continue
+            fi
+            sha256sum "$F" | sed "s#extracted/.*/##" >> release_out/images.sha256
+            zstd -19 -T0 -f "$F" -o "release_out/${img}_evox.img.zst"
+          done
+          ls -lh release_out/
+
+      - name: Extraer fstab, selinux y vintf del vendor
+        run: |
+          set -u
+          cd /tmp/work
+          mkdir -p mnt_ven vendor_meta
+          VEN=$(find extracted -type f -name vendor.img | head -n1)
+
+          ROOT=""
+          if sudo mount -o ro,loop "$VEN" mnt_ven 2>/tmp/mount_err.txt; then
+            ROOT=mnt_ven
+          else
+            cat /tmp/mount_err.txt
+            mkdir -p ven_out
+            if sudo fsck.erofs --extract=ven_out "$VEN"; then ROOT=ven_out; fi
+          fi
+          if [ -z "$ROOT" ]; then
+            echo "::error::No se pudo leer vendor.img"; exit 1
+          fi
+
+          sudo cp -a "$ROOT"/etc/fstab* vendor_meta/ 2>/dev/null || true
+          sudo cp -a "$ROOT"/etc/selinux vendor_meta/selinux_vendor 2>/dev/null || true
+          sudo cp -a "$ROOT"/etc/vintf vendor_meta/vintf_vendor 2>/dev/null || true
+          sudo cp -a "$ROOT"/build.prop vendor_meta/vendor_build.prop 2>/dev/null || true
+          sudo chown -R "$(id -u):$(id -g)" vendor_meta
+          sudo umount mnt_ven 2>/dev/null || true
+
+          echo "=== plat_sepolicy_vers.txt ==="
+          cat vendor_meta/selinux_vendor/plat_sepolicy_vers.txt || true
+          echo "=== fstab* encontrados ==="
+          ls -la vendor_meta/ | grep fstab || true
+          for f in vendor_meta/fstab*; do
+            [ -f "$f" ] && { echo "=== $f ==="; cat "$f"; }
+          done
+
+          tar -czf release_out/vendor_evox_meta.tar.gz vendor_meta
+          mkdir -p "$GITHUB_WORKSPACE/vendor_meta_art"
+          cp -a vendor_meta/. "$GITHUB_WORKSPACE/vendor_meta_art/"
+
+      - name: Publicar en el Release de salida
+        run: |
+          set -euo pipefail
+          cd /tmp/work
+          cat > notes.md <<EOF
