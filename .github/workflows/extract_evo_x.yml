@@ -142,4 +142,15 @@ jobs:
         run: |
           set -euo pipefail
           cd /tmp/work
-          cat > notes.md <<EOF
+          {
+            echo "Imágenes extraídas del ZIP de Evolution X (rhode)."
+            echo "SHA256 del ZIP origen: \`$EXPECTED_SHA\`"
+            echo "Contenido: vendor, boot, vendor_boot, dtbo, vbmeta, vbmeta_system (zstd), images.sha256 y vendor_evox_meta.tar.gz."
+          } > notes.md
+
+          if ! gh release view "$OUT_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$OUT_TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "Evolution X extracted (rhode)" --notes-file notes.md --latest=false
+          fi
+          gh release upload "$OUT_TAG" release_out/* --repo "$GITHUB_REPOSITORY" --clobber
+          gh release view "$OUT_TAG" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[] | "\(.name)  \(.size)"'
