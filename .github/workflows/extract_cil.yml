@@ -69,21 +69,45 @@ jobs:
           rm -f evox.zip
           df -h /
 
-      - name: Extraer system.img
+      - name: Listar particiones y extraer system + vendor
         run: |
-          set -euo pipefail
+          set -u
           cd /tmp/evox_work
-          payload-dumper-go -p system -o extracted payload.bin
+          echo "=== Particiones en el payload ==="
+          payload-dumper-go -l payload.bin || true
+
+          PARTS="system"
+          if payload-dumper-go -l payload.bin 2>/dev/null | grep -qiE '(^|[^a-z_])vendor[ (:,]'; then
+            PARTS="system,vendor"
+          fi
+          echo "Extrayendo: $PARTS"
+          payload-dumper-go -p "$PARTS" -o extracted payload.bin
           rm -f payload.bin
 
           SYS_IMG=$(find extracted -type f -name 'system.img' | head -n1)
-          if [ -z "$SYS_IMG" ]; then
-            echo "::error::payload-dumper-go no produjo system.img"
-            ls -laR extracted || true
-            exit 1
-          fi
           echo "SYS_IMG=/tmp/evox_work/$SYS_IMG" >> "$GITHUB_ENV"
-          ls -lh "$SYS_IMG"
+          VEN_IMG=$(find extracted -type f -name 'vendor.img' | head -n1 || true)
+          [ -n "$VEN_IMG" ] && echo "VEN_IMG=/tmp/evox_work/$VEN_IMG" >> "$GITHUB_ENV"
+          ls -lh extracted/
+
+      - name: Inspeccionar vendor de Evolution X (si existe)
+        if: always()
+        run: |
+          set -u
+          cd /tmp/evox_work
+          if [ -z "${VEN_IMG:-}" ]; then
+            echo "::warning::El payload de Evolution X NO incluye vendor.img"
+            exit 0
+          fi
+          mkdir -p mnt_ven
+          sudo mount -o ro,loop "$VEN_IMG" mnt_ven
+          echo "=== plat_sepolicy_vers.txt ==="
+          sudo cat mnt_ven/etc/selinux/plat_sepolicy_vers.txt
+          echo "=== build.prop (vendor) ==="
+          sudo grep -E 'release|sdk|fingerprint|security_patch|vndk' mnt_ven/build.prop | head -20
+          echo "=== vintf manifest ==="
+          sudo head -c 600 mnt_ven/etc/vintf/manifest.xml || true
+          sudo umount mnt_ven
 
       - name: Obtener carpeta selinux de Evolution X
         run: |
