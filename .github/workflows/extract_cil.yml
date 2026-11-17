@@ -198,3 +198,22 @@ jobs:
             git pull --rebase origin "${GITHUB_REF_NAME}"
             git push origin "HEAD:${GITHUB_REF_NAME}"
           fi
+
+      - name: Guardar vendor y fstab de Evolution X
+        run: |
+          set -u
+          cd /tmp/evox_work
+          mkdir -p mnt_ven "$GITHUB_WORKSPACE/vendor_out"
+          sudo mount -o ro,loop "$VEN_IMG" mnt_ven
+          sudo cp -a mnt_ven/etc/fstab* "$GITHUB_WORKSPACE/vendor_out/" 2>/dev/null || true
+          sudo cp -a mnt_ven/etc/selinux "$GITHUB_WORKSPACE/vendor_out/selinux_vendor"
+          sudo cp -a mnt_ven/etc/vintf "$GITHUB_WORKSPACE/vendor_out/vintf_vendor"
+          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE/vendor_out"
+          sudo umount mnt_ven
+          zstd -19 -T0 "$VEN_IMG" -o "$GITHUB_WORKSPACE/vendor_out/vendor_evox.img.zst"
+
+      - name: Subir vendor_out
+        uses: actions/upload-artifact@v4
+        with:
+          name: evox-vendor
+          path: vendor_out/
