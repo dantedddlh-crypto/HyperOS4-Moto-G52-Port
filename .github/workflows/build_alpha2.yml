@@ -4,13 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       donor_tag:
-        description: 'Release tag de imágenes HyperOS 4 donor (ej. donor-images)'
+        description: 'Release tag de imágenes HyperOS 4 donor'
         required: true
         default: 'donor-images'
       evox_tag:
-        description: 'Release tag de extracción Evolution X (ej. evox-extracted)'
+        description: 'Release tag de Evolution X Base'
         required: true
-        default: 'evox-extracted'
+        default: 'evox-source'
       output_tag:
         description: 'Release tag destino para Alpha 2'
         required: true
@@ -28,7 +28,6 @@ jobs:
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android
           sudo mkdir -p /mnt/work
           sudo chown -R $USER:$USER /mnt/work
-          df -h /mnt/work
 
       - name: Instalar herramientas Android / EROFS / SELinux / Bootimg
         run: |
@@ -37,13 +36,19 @@ jobs:
           git clone --depth=1 https://android.googlesource.com/platform/system/tools/mkbootimg /mnt/work/mkbootimg
           sudo chmod +x /mnt/work/mkbootimg/unpack_bootimg.py /mnt/work/mkbootimg/mkbootimg.py
 
-      - name: Descargar assets de Evolution X y HyperOS 4
+      - name: Descargar assets de evox-source y donor
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p /mnt/work/evox /mnt/work/donor /mnt/work/out
-          gh release download "${{ github.event.inputs.evox_tag }}" -D /mnt/work/evox || true
-          gh release download "${{ github.event.inputs.donor_tag }}" -D /mnt/work/donor || true
+          # Descargar solo los .img.zst necesarios de evox-source (omitimos los zip grandes)
+          gh release download "${{ github.event.inputs.evox_tag }}" \
+            -p "vendor_evox.img.zst" \
+            -p "vendor_boot_evox.img.zst" \
+            -p "vbmeta_evox.img.zst" \
+            -p "vbmeta_system_evox.img.zst" \
+            -D /mnt/work/evox
+          gh release download "${{ github.event.inputs.donor_tag }}" -D /mnt/work/donor
           ls -lh /mnt/work/evox /mnt/work/donor
 
       - name: Descomprimir imágenes base
@@ -52,11 +57,9 @@ jobs:
           for f in *.zst; do [ -f "$f" ] && zstd -d "$f" -o "${f%.zst}"; done
           cd /mnt/work/donor
           for f in *.zst; do [ -f "$f" ] && zstd -d "$f" -o "${f%.zst}"; done
-          # Unir partes de product.img si viene dividido
           if ls product.img.part_* 1> /dev/null 2>&1; then
             cat product.img.part_* > product.img
           fi
-          ls -lh /mnt/work/evox /mnt/work/donor
 
       - name: 1. Validar compatibilidad SELinux (secilc -c 31)
         run: |
@@ -86,7 +89,6 @@ jobs:
       - name: 2. Parchear fstab en vendor_evox.img (Añadir mi_ext + quitar AVB/cifrado)
         run: |
           mkdir -p /mnt/work/vendor_dir
-          # Extraer vendor_evox (soporta EROFS o EXT4)
           if file /mnt/work/evox/vendor_evox.img | grep -qi "EROFS"; then
             fsck.erofs --extract=/mnt/work/vendor_dir /mnt/work/evox/vendor_evox.img
           else
@@ -96,62 +98,53 @@ jobs:
             sudo umount /mnt/work/mnt_ven
           fi
 
-          # Localizar y parchear fstab.qcom / fstab.default
           for FSTAB in /mnt/work/vendor_dir/etc/fstab.*; do
             [ -f "$FSTAB" ] || continue
-            echo "Parcheando $FSTAB..."
-            # 1. Agregar montaje de mi_ext después de product si no existe
+            echo "=== Parcheando $FSTAB ==="
             if ! grep -q "^mi_ext[[:space:]]" "$FSTAB"; then
               sudo sed -i '/^product[[:space:]]/a mi_ext                                                  /mi_ext              erofs   ro                                                   wait,slotselect,logical,first_stage_mount' "$FSTAB"
             fi
-            # 2. Desactivar AVB y fileencryption en userdata para primer arranque limpio
             sudo sed -i 's/,avb=[^,]*//g; s/,avb//g; s/avb=[^,]*,//g' "$FSTAB"
             sudo sed -i 's/fileencryption=[^,]*,//g; s/,fileencryption=[^,]*//g' "$FSTAB"
             cat "$FSTAB"
           done
 
-          # Reempaquetar vendor_evox_patched.img en EROFS preservando xattr y file_contexts
           sudo mkfs.erofs -zlz4hc,9 \
             --file-contexts=/mnt/work/vendor_dir/etc/selinux/vendor_file_contexts \
             /mnt/work/out/vendor_evox_patched.img \
             /mnt/work/vendor_dir
 
-      - name: 3. Parchear fstab dentro de vendor_boot.img (first_stage_mount de mi_ext)
+      - name: 3. Parchear fstab dentro de vendor_boot_evox.img
         run: |
-          if [ -f /mnt/work/evox/vendor_boot.img ]; then
-            mkdir -p /mnt/work/vboot_out /mnt/work/ramdisk_dir
-            python3 /mnt/work/mkbootimg/unpack_bootimg.py \
-              --boot_img /mnt/work/evox/vendor_boot.img \
-              --out /mnt/work/vboot_out > /mnt/work/vboot_info.txt
-            cat /mnt/work/vboot_info.txt
+          mkdir -p /mnt/work/vboot_out /mnt/work/ramdisk_dir
+          python3 /mnt/work/mkbootimg/unpack_bootimg.py \
+            --boot_img /mnt/work/evox/vendor_boot_evox.img \
+            --out /mnt/work/vboot_out \
+            --format mkbootimg > /mnt/work/mkbootimg_args.txt
+          cat /mnt/work/mkbootimg_args.txt
 
-            cd /mnt/work/ramdisk_dir
-            if file /mnt/work/vboot_out/vendor_ramdisk* | grep -qi "LZ4"; then
-              lz4 -d /mnt/work/vboot_out/vendor_ramdisk* -c | cpio -idmv
-            else
-              gzip -dc /mnt/work/vboot_out/vendor_ramdisk* | cpio -idmv
-            fi
-
-            for FSTAB in $(find /mnt/work/ramdisk_dir -name "fstab.*"); do
-              echo "Parcheando ramdisk fstab: $FSTAB"
-              if ! grep -q "^mi_ext[[:space:]]" "$FSTAB"; then
-                sed -i '/^product[[:space:]]/a mi_ext                                                  /mi_ext              erofs   ro                                                   wait,slotselect,logical,first_stage_mount' "$FSTAB"
-              fi
-              sed -i 's/,avb=[^,]*//g; s/,avb//g; s/avb=[^,]*,//g' "$FSTAB"
-            done
-
-            # Reempaquetar vendor_ramdisk y vendor_boot_patched.img
-            find . | cpio -o -H newc | lz4 -l -12 --favor-decSpeed > /mnt/work/vboot_out/vendor_ramdisk_patched
-            # Nota: Ajustar flags según vboot_info.txt (header version 3 o 4)
-            python3 /mnt/work/mkbootimg/mkbootimg.py \
-              --header_version 4 \
-              --vendor_ramdisk /mnt/work/vboot_out/vendor_ramdisk_patched \
-              --dtb /mnt/work/vboot_out/dtb \
-              --vendor_cmdline "$(grep 'vendor command line args:' /mnt/work/vboot_info.txt | cut -d':' -f2- | xargs)" \
-              --vendor_boot /mnt/work/out/vendor_boot_patched.img
+          cd /mnt/work/ramdisk_dir
+          RAMDISK_FILE=$(ls /mnt/work/vboot_out/vendor_ramdisk* | head -n 1)
+          if file "$RAMDISK_FILE" | grep -qi "LZ4"; then
+            lz4 -d "$RAMDISK_FILE" -c | cpio -idmv
           else
-            echo "Aviso: vendor_boot.img no encontrado en evox_tag; asegúrate de subirlo o extraerlo."
+            gzip -dc "$RAMDISK_FILE" | cpio -idmv
           fi
+
+          for FSTAB in $(find /mnt/work/ramdisk_dir -name "fstab.*"); do
+            echo "=== Parcheando ramdisk fstab: $FSTAB ==="
+            if ! grep -q "^mi_ext[[:space:]]" "$FSTAB"; then
+              sed -i '/^product[[:space:]]/a mi_ext                                                  /mi_ext              erofs   ro                                                   wait,slotselect,logical,first_stage_mount' "$FSTAB"
+            fi
+            sed -i 's/,avb=[^,]*//g; s/,avb//g; s/avb=[^,]*,//g' "$FSTAB"
+            cat "$FSTAB"
+          done
+
+          find . | cpio -o -H newc | lz4 -l -12 --favor-decSpeed > "$RAMDISK_FILE"
+
+          # Reempaquetar usando los argumentos exactos extraídos de vendor_boot_evox.img
+          ARGS=$(cat /mnt/work/mkbootimg_args.txt)
+          eval "python3 /mnt/work/mkbootimg/mkbootimg.py $ARGS --vendor_boot /mnt/work/out/vendor_boot_patched.img"
 
       - name: Comprimir y publicar artefactos en Release Alpha 2
         env:
@@ -163,5 +156,5 @@ jobs:
           done
           gh release create "${{ github.event.inputs.output_tag }}" \
             --title "HyperOS 4 Rhode Alpha 2 (Option A - Raw EROFS + mi_ext)" \
-            --notes "vendor_evox y vendor_boot parcheados con soporte nativo para mi_ext_a en EROFS + validación SELinux." \
+            --notes "vendor_evox y vendor_boot parcheados desde evox-source con soporte nativo para mi_ext_a en EROFS + validación SELinux." \
             /mnt/work/out/*.zst || gh release upload "${{ github.event.inputs.output_tag }}" /mnt/work/out/*.zst --clobber
