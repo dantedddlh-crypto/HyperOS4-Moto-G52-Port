@@ -64,29 +64,41 @@ jobs:
           fi
           ls -lh /mnt/work/evox /mnt/work/donor
 
-      - name: 1. Validar compatibilidad SELinux (secilc -c 31)
+      - name: 1. Validar compatibilidad SELinux (Diagnóstico + secilc)
         run: |
           mkdir -p /mnt/work/mnt_sys /mnt/work/mnt_ext /mnt/work/mnt_ven /mnt/work/selinux_test
           sudo mount -o loop,ro /mnt/work/donor/system.img /mnt/work/mnt_sys
           sudo mount -o loop,ro /mnt/work/donor/system_ext.img /mnt/work/mnt_ext
           sudo mount -o loop,ro /mnt/work/evox/vendor_evox.img /mnt/work/mnt_ven
 
+          echo "=== Versión SELinux que exige vendor_evox ==="
+          VENDOR_VER=$(cat /mnt/work/mnt_ven/etc/selinux/plat_sepolicy_vers.txt | tr -d '[:space:]')
+          echo "plat_sepolicy_vers.txt = $VENDOR_VER"
+
+          echo "=== Mappings disponibles en HyperOS 4 (system.img) ==="
+          ls -la /mnt/work/mnt_sys/system/etc/selinux/mapping/
+
+          echo "=== Archivos SELinux en vendor_evox ==="
+          ls -la /mnt/work/mnt_ven/etc/selinux/
+
           cp /mnt/work/mnt_sys/system/etc/selinux/plat_sepolicy.cil /mnt/work/selinux_test/
-          cp /mnt/work/mnt_sys/system/etc/selinux/mapping/31.0.cil /mnt/work/selinux_test/ || true
+          cp /mnt/work/mnt_sys/system/etc/selinux/mapping/${VENDOR_VER}.cil /mnt/work/selinux_test/ || true
           cp /mnt/work/mnt_ext/etc/selinux/system_ext_sepolicy.cil /mnt/work/selinux_test/ || true
           cp /mnt/work/mnt_ven/etc/selinux/*.cil /mnt/work/selinux_test/
 
-          echo "=== Compilando políticas SELinux combinadas ==="
-          secilc -c 31 -O -M true -G -N \
+          echo "=== Buscando quién re-declara system_and_vendor_property_type ==="
+          grep -rn "typeattribute system_and_vendor_property_type" /mnt/work/selinux_test/ || true
+
+          echo "=== Intentando compilar con la versión exacta ($VENDOR_VER) ==="
+          secilc -M true -G -N \
             /mnt/work/selinux_test/plat_sepolicy.cil \
-            /mnt/work/selinux_test/31.0.cil \
+            /mnt/work/selinux_test/${VENDOR_VER}.cil \
             /mnt/work/selinux_test/system_ext_sepolicy.cil \
             /mnt/work/selinux_test/vendor_sepolicy.cil \
             /mnt/work/selinux_test/plat_pub_versioned.cil \
             -o /mnt/work/selinux_test/sepolicy_combined \
             -f /dev/null
 
-          echo "SELinux compilado exitosamente sin conflictos."
           sudo umount /mnt/work/mnt_sys /mnt/work/mnt_ext /mnt/work/mnt_ven
 
       - name: 2. Parchear fstab en vendor_evox.img (Añadir mi_ext + quitar AVB/cifrado)
