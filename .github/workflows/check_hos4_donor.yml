@@ -17,7 +17,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y zstd erofs-utils secilc attr rsync
+          sudo apt-get install -y zstd erofs-utils secilc attr rsync e2fsprogs
 
       - name: Descargar assets
         run: |
@@ -40,12 +40,10 @@ jobs:
             zstd -d -f "dl/$p.img.zst" -o "$p.img"
             rm -f "dl/$p.img.zst"
             E=$(od -An -tx1 -j1024 -N4 "$p.img" | tr -d ' \n')
-            X=$(od -An -tx1 -j1080 -N2 "$p.img" | tr -d ' \n')
-            echo "$p: erofs_magic=$E ext4_magic=$X  (erofs=e2e1f5e0, ext4=53ef)"
+            echo "$p: magic en offset 1024 = $E (EROFS = e2e1f5e0)"
             ls -lh "$p.img"
           done
           mkdir -p vmeta && tar -xzf dl/vendor_evox_meta.tar.gz -C vmeta
-          find vmeta -maxdepth 3 | head -40
 
       - name: Montar y comprobar etiquetas
         run: |
@@ -59,18 +57,13 @@ jobs:
               echo "::warning::$p no montó con loop:"; cat /tmp/err_$p.txt
             fi
           done
-          echo "== raiz de system =="; sudo ls m_system | head -40
           INIT=$(sudo find m_system -maxdepth 3 -path '*bin/init' | head -n1)
           echo "init: $INIT"
           sudo getfattr -n security.selinux "$INIT" || echo "SIN xattr selinux"
-          echo "== mapping de HyperOS =="
-          sudo find m_system -type d -path '*etc/selinux/mapping' -exec ls -la {} \;
-          echo "== system_ext / product selinux =="
-          sudo find m_system_ext m_product -maxdepth 4 -path '*etc/selinux*' | head -40
           echo "== versión vendor evox =="
           cat vmeta/vendor_meta/selinux_vendor/plat_sepolicy_vers.txt
 
-      - name: Compilar política con secilc (prueba offline)
+      - name: Compilar política con secilc (sin archivos userdebug)
         run: |
           set -u
           cd /tmp/w
@@ -78,12 +71,29 @@ jobs:
           V=vmeta/vendor_meta/selinux_vendor
           FILES="$SYS/plat_sepolicy.cil $SYS/mapping/202604.cil"
           [ -f "$SYS/mapping/202604.compat.cil" ] && FILES="$FILES $SYS/mapping/202604.compat.cil"
-          for d in m_system_ext m_product; do
-            for f in $(sudo find "$d" -type f \( -name '*_sepolicy.cil' -o -name '202604.cil' -o -name '202604.compat.cil' \) -path '*etc/selinux*'); do
-              FILES="$FILES $f"
-            done
-          done
+          FILES="$FILES m_system_ext/etc/selinux/mapping/202604.cil m_system_ext/etc/selinux/system_ext_sepolicy.cil"
+          FILES="$FILES m_product/etc/selinux/mapping/202604.cil m_product/etc/selinux/product_sepolicy.cil"
           FILES="$FILES $V/plat_pub_versioned.cil $V/vendor_sepolicy.cil"
           echo "Archivos: $FILES"
           sudo secilc -m -M true -G -N -c 31 -f /dev/null -o /tmp/policy.out $FILES \
             && echo "POLITICA COMPILA" || echo "::error::secilc FALLO (ver mensajes arriba)"
+
+      - name: Medir contenido real de cada imagen
+        run: |
+          set -u
+          cd /tmp/w
+          for p in system system_ext product mi_ext; do
+            echo "== $p (bytes) =="
+            sudo du -sb "m_$p" | cut -f1
+          done
+          echo "== contenido de mi_ext (primer nivel) =="
+          sudo ls -la m_mi_ext | head -30
+
+      - name: Features ext4 de Evolution X (para copiarlas)
+        run: |
+          set -euo pipefail
+          cd /tmp/w
+          gh release download evox-partitions --repo "$GITHUB_REPOSITORY" \
+            -p 'system_evox.img.zst' --dir dl2
+          zstd -d -f dl2/system_evox.img.zst -o system_evox.img
+          sudo dumpe2fs -h system_evox.img 2>&1 | grep -E 'features|Inode size|Block size|Block count|Filesystem volume'
