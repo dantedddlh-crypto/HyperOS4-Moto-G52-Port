@@ -1,4 +1,4 @@
-name: Validate HyperOS donor images against Evolution X vendor
+name: Validate HyperOS EROFS vs Evolution X
 
 on:
   workflow_dispatch:
@@ -17,85 +17,63 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y zstd erofs-utils secilc attr rsync e2fsprogs
+          sudo apt-get install -y zstd erofs-utils secilc attr
 
       - name: Descargar assets
         run: |
           set -euo pipefail
           mkdir -p /tmp/w && cd /tmp/w
           gh release download donor-hyperos4-base --repo "$GITHUB_REPOSITORY" \
-            -p 'system.img.zst' -p 'system_ext.img.zst' -p 'mi_ext.img.zst' \
-            -p 'product.img.zst.part_*' --dir dl
+            -p 'system.img.zst' -p 'system_ext.img.zst' -p 'product.img.zst.part_*' --dir dl
+          gh release download evox-partitions --repo "$GITHUB_REPOSITORY" \
+            -p 'system_evox.img.zst' --dir dl
           gh release download evox-extracted --repo "$GITHUB_REPOSITORY" \
             -p 'vendor_evox_meta.tar.gz' --dir dl
-          ls -lh dl
-
-      - name: Descomprimir y detectar filesystem
-        run: |
-          set -euo pipefail
-          cd /tmp/w
           cat dl/product.img.zst.part_* > dl/product.img.zst
           rm -f dl/product.img.zst.part_*
-          for p in system system_ext product mi_ext; do
-            zstd -d -f "dl/$p.img.zst" -o "$p.img"
-            rm -f "dl/$p.img.zst"
-            E=$(od -An -tx1 -j1024 -N4 "$p.img" | tr -d ' \n')
-            echo "$p: magic en offset 1024 = $E (EROFS = e2e1f5e0)"
-            ls -lh "$p.img"
+          for f in dl/*.zst; do
+            zstd -d -f "$f" -o "$(basename "${f%.zst}")"
+            rm -f "$f"
           done
           mkdir -p vmeta && tar -xzf dl/vendor_evox_meta.tar.gz -C vmeta
+          ls -lh
 
-      - name: Montar y comprobar etiquetas
+      - name: Superblock EROFS - Evolution X (referencia que arranca)
+        run: |
+          cd /tmp/w
+          dump.erofs -s system_evox.img 2>&1 | head -40 || true
+
+      - name: Superblock EROFS - HyperOS system
+        run: |
+          cd /tmp/w
+          dump.erofs -s system.img 2>&1 | head -40 || true
+
+      - name: Superblock EROFS - HyperOS system_ext
+        run: |
+          cd /tmp/w
+          dump.erofs -s system_ext.img 2>&1 | head -40 || true
+
+      - name: Superblock EROFS - HyperOS product
+        run: |
+          cd /tmp/w
+          dump.erofs -s product.img 2>&1 | head -40 || true
+
+      - name: secilc sin la capacidad desconocida (copia)
         run: |
           set -u
           cd /tmp/w
-          for p in system system_ext product mi_ext; do
-            mkdir -p "m_$p"
-            if sudo mount -o ro,loop "$p.img" "m_$p" 2>/tmp/err_$p.txt; then
-              echo "== $p montado =="
-            else
-              echo "::warning::$p no montó con loop:"; cat /tmp/err_$p.txt
-            fi
-          done
-          INIT=$(sudo find m_system -maxdepth 3 -path '*bin/init' | head -n1)
-          echo "init: $INIT"
-          sudo getfattr -n security.selinux "$INIT" || echo "SIN xattr selinux"
-          echo "== versión vendor evox =="
-          cat vmeta/vendor_meta/selinux_vendor/plat_sepolicy_vers.txt
-
-      - name: Compilar política con secilc (sin archivos userdebug)
-        run: |
-          set -u
-          cd /tmp/w
-          SYS=$(sudo find m_system -type d -path '*etc/selinux' | head -n1)
+          mkdir -p m_system m_system_ext
+          sudo mount -o ro,loop system.img m_system
+          sudo mount -o ro,loop system_ext.img m_system_ext
+          SYS=m_system/system/etc/selinux
           V=vmeta/vendor_meta/selinux_vendor
-          FILES="$SYS/plat_sepolicy.cil $SYS/mapping/202604.cil"
-          [ -f "$SYS/mapping/202604.compat.cil" ] && FILES="$FILES $SYS/mapping/202604.compat.cil"
+          mkdir -p cil
+          sudo cp "$SYS/plat_sepolicy.cil" cil/plat.cil
+          sudo chown "$(id -u)" cil/plat.cil
+          sed -i '/functionfs_seclabel/d' cil/plat.cil
+          FILES="cil/plat.cil $SYS/mapping/202604.cil"
           FILES="$FILES m_system_ext/etc/selinux/mapping/202604.cil m_system_ext/etc/selinux/system_ext_sepolicy.cil"
-          FILES="$FILES m_product/etc/selinux/mapping/202604.cil m_product/etc/selinux/product_sepolicy.cil"
           FILES="$FILES $V/plat_pub_versioned.cil $V/vendor_sepolicy.cil"
           echo "Archivos: $FILES"
           sudo secilc -m -M true -G -N -c 31 -f /dev/null -o /tmp/policy.out $FILES \
-            && echo "POLITICA COMPILA" || echo "::error::secilc FALLO (ver mensajes arriba)"
-
-      - name: Medir contenido real de cada imagen
-        run: |
-          set -u
-          cd /tmp/w
-          for p in system system_ext product mi_ext; do
-            echo "== $p (bytes) =="
-            sudo du -sb "m_$p" | cut -f1
-          done
-          echo "== contenido de mi_ext (primer nivel) =="
-          sudo ls -la m_mi_ext | head -30
-
-      - name: Magic bytes y features de system_evox.img
-        run: |
-          set -euo pipefail
-          cd /tmp/w
-          gh release download evox-partitions --repo "$GITHUB_REPOSITORY" \
-            -p 'system_evox.img.zst' --dir dl2
-          zstd -d -f dl2/system_evox.img.zst -o system_evox.img
-          echo "Offset 1024 (EROFS=e2e1f5e0): $(od -An -tx1 -j1024 -N4 system_evox.img | tr -d ' \n')"
-          echo "Offset 1080 (EXT4=53ef):      $(od -An -tx1 -j1080 -N2 system_evox.img | tr -d ' \n')"
-          sudo dumpe2fs -h system_evox.img 2>&1 | grep -E 'features|Inode size|Block size|Block count|Filesystem volume' || true
+            && echo "POLITICA COMPILA" || echo "secilc FALLO (ver mensajes)"
