@@ -1,0 +1,89 @@
+name: Validate HyperOS donor images against Evolution X vendor
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Instalar herramientas
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y zstd erofs-utils secilc attr rsync
+
+      - name: Descargar assets
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/w && cd /tmp/w
+          gh release download donor-hyperos4-base --repo "$GITHUB_REPOSITORY" \
+            -p 'system.img.zst' -p 'system_ext.img.zst' -p 'mi_ext.img.zst' \
+            -p 'product.img.zst.part_*' --dir dl
+          gh release download evox-extracted --repo "$GITHUB_REPOSITORY" \
+            -p 'vendor_evox_meta.tar.gz' --dir dl
+          ls -lh dl
+
+      - name: Descomprimir y detectar filesystem
+        run: |
+          set -euo pipefail
+          cd /tmp/w
+          cat dl/product.img.zst.part_* > dl/product.img.zst
+          rm -f dl/product.img.zst.part_*
+          for p in system system_ext product mi_ext; do
+            zstd -d -f "dl/$p.img.zst" -o "$p.img"
+            rm -f "dl/$p.img.zst"
+            E=$(od -An -tx1 -j1024 -N4 "$p.img" | tr -d ' \n')
+            X=$(od -An -tx1 -j1080 -N2 "$p.img" | tr -d ' \n')
+            echo "$p: erofs_magic=$E ext4_magic=$X  (erofs=e2e1f5e0, ext4=53ef)"
+            ls -lh "$p.img"
+          done
+          mkdir -p vmeta && tar -xzf dl/vendor_evox_meta.tar.gz -C vmeta
+          find vmeta -maxdepth 3 | head -40
+
+      - name: Montar y comprobar etiquetas
+        run: |
+          set -u
+          cd /tmp/w
+          for p in system system_ext product mi_ext; do
+            mkdir -p "m_$p"
+            if sudo mount -o ro,loop "$p.img" "m_$p" 2>/tmp/err_$p.txt; then
+              echo "== $p montado =="
+            else
+              echo "::warning::$p no montó con loop:"; cat /tmp/err_$p.txt
+            fi
+          done
+          echo "== raiz de system =="; sudo ls m_system | head -40
+          INIT=$(sudo find m_system -maxdepth 3 -path '*bin/init' | head -n1)
+          echo "init: $INIT"
+          sudo getfattr -n security.selinux "$INIT" || echo "SIN xattr selinux"
+          echo "== mapping de HyperOS =="
+          sudo find m_system -type d -path '*etc/selinux/mapping' -exec ls -la {} \;
+          echo "== system_ext / product selinux =="
+          sudo find m_system_ext m_product -maxdepth 4 -path '*etc/selinux*' | head -40
+          echo "== versión vendor evox =="
+          cat vmeta/vendor_meta/selinux_vendor/plat_sepolicy_vers.txt
+
+      - name: Compilar política con secilc (prueba offline)
+        run: |
+          set -u
+          cd /tmp/w
+          SYS=$(sudo find m_system -type d -path '*etc/selinux' | head -n1)
+          V=vmeta/vendor_meta/selinux_vendor
+          FILES="$SYS/plat_sepolicy.cil $SYS/mapping/202604.cil"
+          [ -f "$SYS/mapping/202604.compat.cil" ] && FILES="$FILES $SYS/mapping/202604.compat.cil"
+          for d in m_system_ext m_product; do
+            for f in $(sudo find "$d" -type f \( -name '*_sepolicy.cil' -o -name '202604.cil' -o -name '202604.compat.cil' \) -path '*etc/selinux*'); do
+              FILES="$FILES $f"
+            done
+          done
+          FILES="$FILES $V/plat_pub_versioned.cil $V/vendor_sepolicy.cil"
+          echo "Archivos: $FILES"
+          sudo secilc -m -M true -G -N -c 31 -f /dev/null -o /tmp/policy.out $FILES \
+            && echo "POLITICA COMPILA" || echo "::error::secilc FALLO (ver mensajes arriba)"
