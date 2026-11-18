@@ -89,11 +89,13 @@ jobs:
           echo "== contenido de mi_ext (primer nivel) =="
           sudo ls -la m_mi_ext | head -30
 
-      - name: Features ext4 de Evolution X (para copiarlas)
+      - name: Magic bytes y features de system_evox.img
         run: |
           set -euo pipefail
           cd /tmp/w
           gh release download evox-partitions --repo "$GITHUB_REPOSITORY" \
             -p 'system_evox.img.zst' --dir dl2
           zstd -d -f dl2/system_evox.img.zst -o system_evox.img
-          sudo dumpe2fs -h system_evox.img 2>&1 | grep -E 'features|Inode size|Block size|Block count|Filesystem volume'
+          echo "Offset 1024 (EROFS=e2e1f5e0): $(od -An -tx1 -j1024 -N4 system_evox.img | tr -d ' \n')"
+          echo "Offset 1080 (EXT4=53ef):      $(od -An -tx1 -j1080 -N2 system_evox.img | tr -d ' \n')"
+          sudo dumpe2fs -h system_evox.img 2>&1 | grep -E 'features|Inode size|Block size|Block count|Filesystem volume' || true
