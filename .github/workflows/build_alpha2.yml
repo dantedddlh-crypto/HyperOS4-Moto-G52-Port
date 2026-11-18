@@ -6,7 +6,7 @@ on:
       donor_tag:
         description: 'Release tag de imágenes HyperOS 4 donor'
         required: true
-        default: 'donor-images'
+        default: 'donor-hyperos4-base'
       evox_tag:
         description: 'Release tag de Evolution X Base'
         required: true
@@ -36,19 +36,21 @@ jobs:
           git clone --depth=1 https://android.googlesource.com/platform/system/tools/mkbootimg /mnt/work/mkbootimg
           sudo chmod +x /mnt/work/mkbootimg/unpack_bootimg.py /mnt/work/mkbootimg/mkbootimg.py
 
-      - name: Descargar assets de evox-source y donor
+      - name: Descargar assets de evox-source y donor-hyperos4-base
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p /mnt/work/evox /mnt/work/donor /mnt/work/out
-          # Descargar solo los .img.zst necesarios de evox-source (omitimos los zip grandes)
           gh release download "${{ github.event.inputs.evox_tag }}" \
+            -R "${{ github.repository }}" \
             -p "vendor_evox.img.zst" \
             -p "vendor_boot_evox.img.zst" \
             -p "vbmeta_evox.img.zst" \
             -p "vbmeta_system_evox.img.zst" \
             -D /mnt/work/evox
-          gh release download "${{ github.event.inputs.donor_tag }}" -D /mnt/work/donor
+          gh release download "${{ github.event.inputs.donor_tag }}" \
+            -R "${{ github.repository }}" \
+            -D /mnt/work/donor
           ls -lh /mnt/work/evox /mnt/work/donor
 
       - name: Descomprimir imágenes base
@@ -60,6 +62,7 @@ jobs:
           if ls product.img.part_* 1> /dev/null 2>&1; then
             cat product.img.part_* > product.img
           fi
+          ls -lh /mnt/work/evox /mnt/work/donor
 
       - name: 1. Validar compatibilidad SELinux (secilc -c 31)
         run: |
@@ -142,7 +145,6 @@ jobs:
 
           find . | cpio -o -H newc | lz4 -l -12 --favor-decSpeed > "$RAMDISK_FILE"
 
-          # Reempaquetar usando los argumentos exactos extraídos de vendor_boot_evox.img
           ARGS=$(cat /mnt/work/mkbootimg_args.txt)
           eval "python3 /mnt/work/mkbootimg/mkbootimg.py $ARGS --vendor_boot /mnt/work/out/vendor_boot_patched.img"
 
@@ -155,6 +157,7 @@ jobs:
             [ -f "$img" ] && zstd -19 -T0 "$img" -o "${img}.zst"
           done
           gh release create "${{ github.event.inputs.output_tag }}" \
+            -R "${{ github.repository }}" \
             --title "HyperOS 4 Rhode Alpha 2 (Option A - Raw EROFS + mi_ext)" \
             --notes "vendor_evox y vendor_boot parcheados desde evox-source con soporte nativo para mi_ext_a en EROFS + validación SELinux." \
-            /mnt/work/out/*.zst || gh release upload "${{ github.event.inputs.output_tag }}" /mnt/work/out/*.zst --clobber
+            /mnt/work/out/*.zst || gh release upload "${{ github.event.inputs.output_tag }}" -R "${{ github.repository }}" /mnt/work/out/*.zst --clobber
