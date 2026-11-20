@@ -1,4 +1,4 @@
-name: Build HyperOS 4 Alpha 2 (Option A - Raw EROFS + mi_ext)
+name: Build HyperOS 4 Alpha 2 (Option A - Raw EROFS + mi_ext + Precompiled SEPolicy)
 
 on:
   workflow_dispatch:
@@ -51,7 +51,6 @@ jobs:
           gh release download "${{ github.event.inputs.donor_tag }}" \
             -R "${{ github.repository }}" \
             -D /mnt/work/donor
-          ls -lh /mnt/work/evox /mnt/work/donor
 
       - name: Descomprimir imágenes base
         run: |
@@ -62,46 +61,91 @@ jobs:
           if ls product.img.part_* 1> /dev/null 2>&1; then
             cat product.img.part_* > product.img
           fi
-          ls -lh /mnt/work/evox /mnt/work/donor
 
-      - name: 1. Validar compatibilidad SELinux (Diagnóstico + secilc)
+      - name: 1. Compilar precompiled_sepolicy y calcular hashes SHA-256 reales de HyperOS 4
         run: |
-          mkdir -p /mnt/work/mnt_sys /mnt/work/mnt_ext /mnt/work/mnt_ven /mnt/work/selinux_test
+          mkdir -p /mnt/work/mnt_sys /mnt/work/mnt_ext /mnt/work/mnt_prod /mnt/work/mnt_mi /mnt/work/mnt_ven /mnt/work/selinux_build
           sudo mount -o loop,ro /mnt/work/donor/system.img /mnt/work/mnt_sys
           sudo mount -o loop,ro /mnt/work/donor/system_ext.img /mnt/work/mnt_ext
+          sudo mount -o loop,ro /mnt/work/donor/product.img /mnt/work/mnt_prod
+          sudo mount -o loop,ro /mnt/work/donor/mi_ext.img /mnt/work/mnt_mi
           sudo mount -o loop,ro /mnt/work/evox/vendor_evox.img /mnt/work/mnt_ven
 
-          echo "=== Versión SELinux que exige vendor_evox ==="
           VENDOR_VER=$(cat /mnt/work/mnt_ven/etc/selinux/plat_sepolicy_vers.txt | tr -d '[:space:]')
-          echo "plat_sepolicy_vers.txt = $VENDOR_VER"
+          echo "Versión SELinux vendor: $VENDOR_VER"
 
-          echo "=== Mappings disponibles en HyperOS 4 (system.img) ==="
-          ls -la /mnt/work/mnt_sys/system/etc/selinux/mapping/
+          # Copiar .cil de todas las particiones
+          cp /mnt/work/mnt_sys/system/etc/selinux/plat_sepolicy.cil /mnt/work/selinux_build/
+          cp /mnt/work/mnt_sys/system/etc/selinux/mapping/${VENDOR_VER}.cil /mnt/work/selinux_build/
+          cp /mnt/work/mnt_sys/system/etc/selinux/mapping/${VENDOR_VER}.compat.cil /mnt/work/selinux_build/ 2>/dev/null || true
+          cp /mnt/work/mnt_ext/etc/selinux/system_ext_sepolicy.cil /mnt/work/selinux_build/ 2>/dev/null || true
+          cp /mnt/work/mnt_ext/etc/selinux/mapping/${VENDOR_VER}.cil /mnt/work/selinux_build/system_ext_mapping.cil 2>/dev/null || true
+          cp /mnt/work/mnt_prod/etc/selinux/product_sepolicy.cil /mnt/work/selinux_build/ 2>/dev/null || true
+          cp /mnt/work/mnt_prod/etc/selinux/mapping/${VENDOR_VER}.cil /mnt/work/selinux_build/product_mapping.cil 2>/dev/null || true
+          cp /mnt/work/mnt_mi/etc/selinux/*.cil /mnt/work/selinux_build/ 2>/dev/null || true
+          cp /mnt/work/mnt_ven/etc/selinux/vendor_sepolicy.cil /mnt/work/selinux_build/
+          cp /mnt/work/mnt_ven/etc/selinux/plat_pub_versioned.cil /mnt/work/selinux_build/
 
-          echo "=== Archivos SELinux en vendor_evox ==="
-          ls -la /mnt/work/mnt_ven/etc/selinux/
+          # Calcular los SHA-256 exactos que init verifica al arrancar (usando archivos originales sin modificar)
+          cat /mnt/work/mnt_sys/system/etc/selinux/plat_sepolicy.cil \
+              /mnt/work/mnt_sys/system/etc/selinux/mapping/${VENDOR_VER}.cil \
+              /mnt/work/mnt_sys/system/etc/selinux/mapping/${VENDOR_VER}.compat.cil 2>/dev/null | sha256sum | awk '{print $1}' > /mnt/work/selinux_build/plat_and_mapping.sha256
 
-          cp /mnt/work/mnt_sys/system/etc/selinux/plat_sepolicy.cil /mnt/work/selinux_test/
-          cp /mnt/work/mnt_sys/system/etc/selinux/mapping/${VENDOR_VER}.cil /mnt/work/selinux_test/ || true
-          cp /mnt/work/mnt_ext/etc/selinux/system_ext_sepolicy.cil /mnt/work/selinux_test/ || true
-          cp /mnt/work/mnt_ven/etc/selinux/*.cil /mnt/work/selinux_test/
+          cat /mnt/work/mnt_ext/etc/selinux/system_ext_sepolicy.cil \
+              /mnt/work/mnt_ext/etc/selinux/mapping/${VENDOR_VER}.cil 2>/dev/null | sha256sum | awk '{print $1}' > /mnt/work/selinux_build/system_ext_and_mapping.sha256
 
-          echo "=== Buscando quién re-declara system_and_vendor_property_type ==="
-          grep -rn "typeattribute system_and_vendor_property_type" /mnt/work/selinux_test/ || true
+          cat /mnt/work/mnt_prod/etc/selinux/product_sepolicy.cil \
+              /mnt/work/mnt_prod/etc/selinux/mapping/${VENDOR_VER}.cil 2>/dev/null | sha256sum | awk '{print $1}' > /mnt/work/selinux_build/product_and_mapping.sha256
 
-          echo "=== Intentando compilar con la versión exacta ($VENDOR_VER) ==="
-          secilc -M true -G -N \
-            /mnt/work/selinux_test/plat_sepolicy.cil \
-            /mnt/work/selinux_test/${VENDOR_VER}.cil \
-            /mnt/work/selinux_test/system_ext_sepolicy.cil \
-            /mnt/work/selinux_test/vendor_sepolicy.cil \
-            /mnt/work/selinux_test/plat_pub_versioned.cil \
-            -o /mnt/work/selinux_test/sepolicy_combined \
+          # Deduplicar declaraciones (typeattribute ...) repetidas en plat_sepolicy.cil para compilar el binario
+          python3 - << 'EOF'
+          import glob
+
+          seen_attrs = set()
+          files = [
+              "/mnt/work/selinux_build/plat_sepolicy.cil",
+              "/mnt/work/selinux_build/202604.cil",
+              "/mnt/work/selinux_build/202604.compat.cil",
+              "/mnt/work/selinux_build/system_ext_sepolicy.cil",
+              "/mnt/work/selinux_build/system_ext_mapping.cil",
+              "/mnt/work/selinux_build/product_sepolicy.cil",
+              "/mnt/work/selinux_build/product_mapping.cil",
+              "/mnt/work/selinux_build/plat_pub_versioned.cil",
+              "/mnt/work/selinux_build/vendor_sepolicy.cil",
+          ]
+          for path in files:
+              try:
+                  with open(path, "r") as f:
+                      lines = f.readlines()
+              except FileNotFoundError:
+                  continue
+              out_lines = []
+              for line in lines:
+                  s = line.strip()
+                  if s.startswith("(typeattribute ") and s.endswith(")"):
+                      if s in seen_attrs:
+                          print(f"Eliminando duplicado en {path}: {s}")
+                          continue
+                      seen_attrs.add(s)
+                  out_lines.append(line)
+              with open(path, "w") as f:
+                  f.writelines(out_lines)
+          EOF
+
+          CIL_LIST=""
+          for f in plat_sepolicy.cil ${VENDOR_VER}.cil ${VENDOR_VER}.compat.cil system_ext_sepolicy.cil system_ext_mapping.cil product_sepolicy.cil product_mapping.cil plat_pub_versioned.cil vendor_sepolicy.cil; do
+            [ -f "/mnt/work/selinux_build/$f" ] && CIL_LIST="$CIL_LIST /mnt/work/selinux_build/$f"
+          done
+
+          echo "=== Compilando precompiled_sepolicy ==="
+          secilc -M true -G -N $CIL_LIST \
+            -o /mnt/work/selinux_build/precompiled_sepolicy \
             -f /dev/null
 
-          sudo umount /mnt/work/mnt_sys /mnt/work/mnt_ext /mnt/work/mnt_ven
+          ls -lh /mnt/work/selinux_build/precompiled_sepolicy
+          sudo umount /mnt/work/mnt_sys /mnt/work/mnt_ext /mnt/work/mnt_prod /mnt/work/mnt_mi /mnt/work/mnt_ven
 
-      - name: 2. Parchear fstab en vendor_evox.img (Añadir mi_ext + quitar AVB/cifrado)
+      - name: 2. Parchear vendor_evox.img (fstab + precompiled_sepolicy + hashes SHA-256)
         run: |
           mkdir -p /mnt/work/vendor_dir
           if file /mnt/work/evox/vendor_evox.img | grep -qi "EROFS"; then
@@ -113,6 +157,13 @@ jobs:
             sudo umount /mnt/work/mnt_ven
           fi
 
+          # Inyectar precompiled_sepolicy y los nuevos hashes SHA-256
+          sudo cp /mnt/work/selinux_build/precompiled_sepolicy /mnt/work/vendor_dir/etc/selinux/precompiled_sepolicy
+          sudo cp /mnt/work/selinux_build/plat_and_mapping.sha256 /mnt/work/vendor_dir/etc/selinux/precompiled_sepolicy.plat_sepolicy_and_mapping.sha256
+          sudo cp /mnt/work/selinux_build/system_ext_and_mapping.sha256 /mnt/work/vendor_dir/etc/selinux/precompiled_sepolicy.system_ext_sepolicy_and_mapping.sha256
+          sudo cp /mnt/work/selinux_build/product_and_mapping.sha256 /mnt/work/vendor_dir/etc/selinux/precompiled_sepolicy.product_sepolicy_and_mapping.sha256
+
+          # Parchear fstab
           for FSTAB in /mnt/work/vendor_dir/etc/fstab.*; do
             [ -f "$FSTAB" ] || continue
             echo "=== Parcheando $FSTAB ==="
@@ -121,7 +172,6 @@ jobs:
             fi
             sudo sed -i 's/,avb=[^,]*//g; s/,avb//g; s/avb=[^,]*,//g' "$FSTAB"
             sudo sed -i 's/fileencryption=[^,]*,//g; s/,fileencryption=[^,]*//g' "$FSTAB"
-            cat "$FSTAB"
           done
 
           sudo mkfs.erofs -zlz4hc,9 \
@@ -136,7 +186,6 @@ jobs:
             --boot_img /mnt/work/evox/vendor_boot_evox.img \
             --out /mnt/work/vboot_out \
             --format mkbootimg > /mnt/work/mkbootimg_args.txt
-          cat /mnt/work/mkbootimg_args.txt
 
           cd /mnt/work/ramdisk_dir
           RAMDISK_FILE=$(ls /mnt/work/vboot_out/vendor_ramdisk* | head -n 1)
@@ -152,7 +201,6 @@ jobs:
               sed -i '/^product[[:space:]]/a mi_ext                                                  /mi_ext              erofs   ro                                                   wait,slotselect,logical,first_stage_mount' "$FSTAB"
             fi
             sed -i 's/,avb=[^,]*//g; s/,avb//g; s/avb=[^,]*,//g' "$FSTAB"
-            cat "$FSTAB"
           done
 
           find . | cpio -o -H newc | lz4 -l -12 --favor-decSpeed > "$RAMDISK_FILE"
@@ -170,6 +218,6 @@ jobs:
           done
           gh release create "${{ github.event.inputs.output_tag }}" \
             -R "${{ github.repository }}" \
-            --title "HyperOS 4 Rhode Alpha 2 (Option A - Raw EROFS + mi_ext)" \
-            --notes "vendor_evox y vendor_boot parcheados desde evox-source con soporte nativo para mi_ext_a en EROFS + validación SELinux." \
+            --title "HyperOS 4 Rhode Alpha 2 (Option A - Raw EROFS + mi_ext + Precompiled SEPolicy)" \
+            --notes "vendor_evox y vendor_boot parcheados con mi_ext_a y precompiled_sepolicy compilado contra HyperOS 4." \
             /mnt/work/out/*.zst || gh release upload "${{ github.event.inputs.output_tag }}" -R "${{ github.repository }}" /mnt/work/out/*.zst --clobber
