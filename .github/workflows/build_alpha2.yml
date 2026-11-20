@@ -56,51 +56,58 @@ jobs:
         run: |
           cd /mnt/work/evox
           for f in *.zst; do [ -f "$f" ] && zstd -d "$f" -o "${f%.zst}"; done
+
           cd /mnt/work/donor
+          # 1. Si product viene dividido como product.img.zst.part_*, unir primero y luego descomprimir
+          if ls product.img.zst.part_* 1> /dev/null 2>&1; then
+            cat product.img.zst.part_* > product.img.zst
+          fi
+          # 2. Descomprimir todos los .zst
           for f in *.zst; do [ -f "$f" ] && zstd -d "$f" -o "${f%.zst}"; done
+          # 3. Por si vino dividido ya descomprimido como product.img.part_*
           if ls product.img.part_* 1> /dev/null 2>&1; then
             cat product.img.part_* > product.img
           fi
+          ls -lh /mnt/work/evox /mnt/work/donor
 
       - name: 1. Compilar precompiled_sepolicy y calcular hashes SHA-256 reales de HyperOS 4
         run: |
-          mkdir -p /mnt/work/mnt_sys /mnt/work/mnt_ext /mnt/work/mnt_prod /mnt/work/mnt_mi /mnt/work/mnt_ven /mnt/work/selinux_build
-          sudo mount -o loop,ro /mnt/work/donor/system.img /mnt/work/mnt_sys
-          sudo mount -o loop,ro /mnt/work/donor/system_ext.img /mnt/work/mnt_ext
-          sudo mount -o loop,ro /mnt/work/donor/product.img /mnt/work/mnt_prod
-          sudo mount -o loop,ro /mnt/work/donor/mi_ext.img /mnt/work/mnt_mi
-          sudo mount -o loop,ro /mnt/work/evox/vendor_evox.img /mnt/work/mnt_ven
+          mkdir -p /mnt/work/ext_sys /mnt/work/ext_ext /mnt/work/ext_prod /mnt/work/ext_mi /mnt/work/ext_ven /mnt/work/selinux_build
 
-          VENDOR_VER=$(cat /mnt/work/mnt_ven/etc/selinux/plat_sepolicy_vers.txt | tr -d '[:space:]')
+          # Extraer solo las carpetas etc/selinux con fsck.erofs (sin usar mount -o loop)
+          fsck.erofs --extract=/mnt/work/ext_sys --extract-path=/system/etc/selinux /mnt/work/donor/system.img || fsck.erofs --extract=/mnt/work/ext_sys /mnt/work/donor/system.img
+          fsck.erofs --extract=/mnt/work/ext_ext /mnt/work/donor/system_ext.img
+          fsck.erofs --extract=/mnt/work/ext_prod /mnt/work/donor/product.img
+          fsck.erofs --extract=/mnt/work/ext_mi /mnt/work/donor/mi_ext.img
+          fsck.erofs --extract=/mnt/work/ext_ven /mnt/work/evox/vendor_evox.img
+
+          VENDOR_VER=$(cat /mnt/work/ext_ven/etc/selinux/plat_sepolicy_vers.txt | tr -d '[:space:]')
           echo "Versión SELinux vendor: $VENDOR_VER"
 
-          # Copiar .cil de todas las particiones
-          cp /mnt/work/mnt_sys/system/etc/selinux/plat_sepolicy.cil /mnt/work/selinux_build/
-          cp /mnt/work/mnt_sys/system/etc/selinux/mapping/${VENDOR_VER}.cil /mnt/work/selinux_build/
-          cp /mnt/work/mnt_sys/system/etc/selinux/mapping/${VENDOR_VER}.compat.cil /mnt/work/selinux_build/ 2>/dev/null || true
-          cp /mnt/work/mnt_ext/etc/selinux/system_ext_sepolicy.cil /mnt/work/selinux_build/ 2>/dev/null || true
-          cp /mnt/work/mnt_ext/etc/selinux/mapping/${VENDOR_VER}.cil /mnt/work/selinux_build/system_ext_mapping.cil 2>/dev/null || true
-          cp /mnt/work/mnt_prod/etc/selinux/product_sepolicy.cil /mnt/work/selinux_build/ 2>/dev/null || true
-          cp /mnt/work/mnt_prod/etc/selinux/mapping/${VENDOR_VER}.cil /mnt/work/selinux_build/product_mapping.cil 2>/dev/null || true
-          cp /mnt/work/mnt_mi/etc/selinux/*.cil /mnt/work/selinux_build/ 2>/dev/null || true
-          cp /mnt/work/mnt_ven/etc/selinux/vendor_sepolicy.cil /mnt/work/selinux_build/
-          cp /mnt/work/mnt_ven/etc/selinux/plat_pub_versioned.cil /mnt/work/selinux_build/
+          cp /mnt/work/ext_sys/system/etc/selinux/plat_sepolicy.cil /mnt/work/selinux_build/
+          cp /mnt/work/ext_sys/system/etc/selinux/mapping/${VENDOR_VER}.cil /mnt/work/selinux_build/
+          cp /mnt/work/ext_sys/system/etc/selinux/mapping/${VENDOR_VER}.compat.cil /mnt/work/selinux_build/ 2>/dev/null || true
+          cp /mnt/work/ext_ext/etc/selinux/system_ext_sepolicy.cil /mnt/work/selinux_build/ 2>/dev/null || true
+          cp /mnt/work/ext_ext/etc/selinux/mapping/${VENDOR_VER}.cil /mnt/work/selinux_build/system_ext_mapping.cil 2>/dev/null || true
+          cp /mnt/work/ext_prod/etc/selinux/product_sepolicy.cil /mnt/work/selinux_build/ 2>/dev/null || true
+          cp /mnt/work/ext_prod/etc/selinux/mapping/${VENDOR_VER}.cil /mnt/work/selinux_build/product_mapping.cil 2>/dev/null || true
+          cp /mnt/work/ext_mi/etc/selinux/*.cil /mnt/work/selinux_build/ 2>/dev/null || true
+          cp /mnt/work/ext_ven/etc/selinux/vendor_sepolicy.cil /mnt/work/selinux_build/
+          cp /mnt/work/ext_ven/etc/selinux/plat_pub_versioned.cil /mnt/work/selinux_build/
 
-          # Calcular los SHA-256 exactos que init verifica al arrancar (usando archivos originales sin modificar)
-          cat /mnt/work/mnt_sys/system/etc/selinux/plat_sepolicy.cil \
-              /mnt/work/mnt_sys/system/etc/selinux/mapping/${VENDOR_VER}.cil \
-              /mnt/work/mnt_sys/system/etc/selinux/mapping/${VENDOR_VER}.compat.cil 2>/dev/null | sha256sum | awk '{print $1}' > /mnt/work/selinux_build/plat_and_mapping.sha256
+          # Calcular los SHA-256 exactos que init verifica al arrancar
+          cat /mnt/work/ext_sys/system/etc/selinux/plat_sepolicy.cil \
+              /mnt/work/ext_sys/system/etc/selinux/mapping/${VENDOR_VER}.cil \
+              /mnt/work/ext_sys/system/etc/selinux/mapping/${VENDOR_VER}.compat.cil 2>/dev/null | sha256sum | awk '{print $1}' > /mnt/work/selinux_build/plat_and_mapping.sha256
 
-          cat /mnt/work/mnt_ext/etc/selinux/system_ext_sepolicy.cil \
-              /mnt/work/mnt_ext/etc/selinux/mapping/${VENDOR_VER}.cil 2>/dev/null | sha256sum | awk '{print $1}' > /mnt/work/selinux_build/system_ext_and_mapping.sha256
+          cat /mnt/work/ext_ext/etc/selinux/system_ext_sepolicy.cil \
+              /mnt/work/ext_ext/etc/selinux/mapping/${VENDOR_VER}.cil 2>/dev/null | sha256sum | awk '{print $1}' > /mnt/work/selinux_build/system_ext_and_mapping.sha256
 
-          cat /mnt/work/mnt_prod/etc/selinux/product_sepolicy.cil \
-              /mnt/work/mnt_prod/etc/selinux/mapping/${VENDOR_VER}.cil 2>/dev/null | sha256sum | awk '{print $1}' > /mnt/work/selinux_build/product_and_mapping.sha256
+          cat /mnt/work/ext_prod/etc/selinux/product_sepolicy.cil \
+              /mnt/work/ext_prod/etc/selinux/mapping/${VENDOR_VER}.cil 2>/dev/null | sha256sum | awk '{print $1}' > /mnt/work/selinux_build/product_and_mapping.sha256
 
-          # Deduplicar declaraciones (typeattribute ...) repetidas en plat_sepolicy.cil para compilar el binario
+          # Deduplicar declaraciones (typeattribute ...) repetidas en plat_sepolicy.cil
           python3 - << 'EOF'
-          import glob
-
           seen_attrs = set()
           files = [
               "/mnt/work/selinux_build/plat_sepolicy.cil",
@@ -143,7 +150,7 @@ jobs:
             -f /dev/null
 
           ls -lh /mnt/work/selinux_build/precompiled_sepolicy
-          sudo umount /mnt/work/mnt_sys /mnt/work/mnt_ext /mnt/work/mnt_prod /mnt/work/mnt_mi /mnt/work/mnt_ven
+          rm -rf /mnt/work/ext_sys /mnt/work/ext_ext /mnt/work/ext_prod /mnt/work/ext_mi /mnt/work/ext_ven
 
       - name: 2. Parchear vendor_evox.img (fstab + precompiled_sepolicy + hashes SHA-256)
         run: |
