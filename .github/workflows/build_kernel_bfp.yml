@@ -14,24 +14,17 @@ permissions:
 
 jobs:
   build-kernel:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout repositorio
         uses: actions/checkout@v4
 
-      - name: Preparar /mnt/work, dependencias, fix libxml2.so.2 y magiskboot
+      - name: Preparar /mnt/work, dependencias y magiskboot
         run: |
           sudo mkdir -p /mnt/work/tools /mnt/work/toolchain /mnt/work/kernel
           sudo chown -R $USER:$USER /mnt/work
           sudo apt-get update
           sudo apt-get install -y bc bison build-essential ccache curl flex git libncurses5-dev libssl-dev libelf-dev libxml2 libxml2-dev python3 python-is-python3 wget xz-utils zip zstd cpio p7zip-full
-
-          # Fix libxml2.so.2 en Ubuntu 24.04 para ld.lld de ZyCromerZ Clang
-          if [ ! -f /usr/lib/x86_64-linux-gnu/libxml2.so.2 ]; then
-            LIBXML_REAL=$(find /usr/lib/x86_64-linux-gnu -name "libxml2.so.*" | head -n 1)
-            sudo ln -sf "$LIBXML_REAL" /usr/lib/x86_64-linux-gnu/libxml2.so.2
-            sudo ldconfig
-          fi
 
           curl -fL "https://github.com/topjohnwu/Magisk/releases/download/v28.1/Magisk-v28.1.apk" -o /mnt/work/magisk.apk
           unzip -p /mnt/work/magisk.apk lib/x86_64/libmagiskboot.so > /mnt/work/tools/magiskboot
