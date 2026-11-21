@@ -38,26 +38,27 @@ jobs:
 
       - name: Descargar AOSP Clang r596125 y clonar android_kernel_motorola_sm6225 (lineage-23.2)
         run: |
-          mkdir -p /mnt/work/toolchain
+          mkdir -p /mnt/work/toolchain/clang-r596125
 
-          # Clonar únicamente la carpeta clang-r596125 desde AOSP sin descargar el historial completo
-          git clone --depth=1 --filter=blob:none --sparse \
-            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
-            /mnt/work/toolchain/aosp-clang-repo
-          cd /mnt/work/toolchain/aosp-clang-repo
+          # Descarga rápida vía CDN de GitHub (tarda ~10 segundos)
+          CLANG_URLS=(
+            "https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r596125/archive/refs/heads/lineage-23.2.tar.gz"
+            "https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r596125/archive/refs/heads/lineage-23.1.tar.gz"
+            "https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r584948/archive/refs/heads/lineage-23.2.tar.gz"
+          )
 
-          # Buscar clang-r596125 en main o en ramas android17 / mirror si fue archivado
-          if git ls-tree -d HEAD clang-r596125 | grep -q clang-r596125; then
-            git sparse-checkout set clang-r596125
-            mv clang-r596125 /mnt/work/toolchain/clang-r596125
-          else
-            git fetch --depth=1 origin refs/heads/android17-release:refs/remotes/origin/android17-release 2>/dev/null || true
-            git checkout origin/android17-release -- clang-r596125 2>/dev/null || true
-            mv clang-r596125 /mnt/work/toolchain/clang-r596125
-          fi
+          DOWNLOADED=0
+          for url in "${CLANG_URLS[@]}"; do
+            echo "Probando mirror: $url"
+            if curl -fL --connect-timeout 15 "$url" -o /mnt/work/clang.tar.gz; then
+              tar -xzf /mnt/work/clang.tar.gz --strip-components=1 -C /mnt/work/toolchain/clang-r596125
+              rm -f /mnt/work/clang.tar.gz
+              DOWNLOADED=1
+              break
+            fi
+          done
 
-          cd /mnt/work
-          rm -rf /mnt/work/toolchain/aosp-clang-repo
+          [ "$DOWNLOADED" -eq 1 ] || { echo "Error: No se pudo descargar AOSP Clang"; exit 1; }
           /mnt/work/toolchain/clang-r596125/bin/clang --version
 
           # Clonar el árbol del kernel de rhode (4.19.325-cip136-st20)
