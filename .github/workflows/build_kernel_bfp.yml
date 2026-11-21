@@ -83,14 +83,38 @@ jobs:
           echo "=== Diff aplicado en kernel/sys.c ==="
           git diff kernel/sys.c
 
-      - name: Compilar kernel (rhode_defconfig) con AOSP Clang r596125
+      - name: Configurar y compilar kernel (rhode) con AOSP Clang r596125
         run: |
           cd /mnt/work/kernel
           export PATH="/mnt/work/toolchain/clang-r596125/bin:$PATH"
           export ARCH=arm64
           export SUBARCH=arm64
 
-          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 rhode_defconfig
+          echo "=== Defconfigs disponibles en arch/arm64/configs/vendor ==="
+          find arch/arm64/configs -type f | sort
+
+          # Ensamblar configuración real de Motorola SM6225 (rhode)
+          BASE_DEFCONFIG="vendor/bengal-perf_defconfig"
+          [ ! -f "arch/arm64/configs/$BASE_DEFCONFIG" ] && BASE_DEFCONFIG="vendor/sm6225-perf_defconfig"
+
+          FRAGMENTS=""
+          for frag in \
+            "arch/arm64/configs/vendor/ext_config/moto-bengal.config" \
+            "arch/arm64/configs/vendor/ext_config/rhode-default.config" \
+            "arch/arm64/configs/vendor/rhode.config"; do
+            [ -f "$frag" ] && FRAGMENTS="$FRAGMENTS $frag"
+          done
+
+          echo "Base elegida: $BASE_DEFCONFIG"
+          echo "Fragmentos aplicados: $FRAGMENTS"
+
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 $BASE_DEFCONFIG
+          if [ -n "$FRAGMENTS" ]; then
+            ARCH=arm64 scripts/kconfig/merge_config.sh -m -O out out/.config $FRAGMENTS
+            make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
+          fi
+
+          # Compilar Image.gz-dtb y DTBs con los mismos flags de AOSP Clang r596125
           make -j$(nproc --all) O=out \
             ARCH=arm64 \
             CC=clang \
