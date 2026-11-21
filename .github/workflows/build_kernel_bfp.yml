@@ -38,11 +38,29 @@ jobs:
 
       - name: Descargar AOSP Clang r596125 y clonar android_kernel_motorola_sm6225 (lineage-23.2)
         run: |
-          mkdir -p /mnt/work/toolchain/clang-r596125
-          curl -fL "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r596125.tar.gz" -o /mnt/work/clang.tar.gz
-          tar -xzf /mnt/work/clang.tar.gz -C /mnt/work/toolchain/clang-r596125
-          rm -f /mnt/work/clang.tar.gz
+          mkdir -p /mnt/work/toolchain
 
+          # Clonar únicamente la carpeta clang-r596125 desde AOSP sin descargar el historial completo
+          git clone --depth=1 --filter=blob:none --sparse \
+            https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 \
+            /mnt/work/toolchain/aosp-clang-repo
+          cd /mnt/work/toolchain/aosp-clang-repo
+
+          # Buscar clang-r596125 en main o en ramas android17 / mirror si fue archivado
+          if git ls-tree -d HEAD clang-r596125 | grep -q clang-r596125; then
+            git sparse-checkout set clang-r596125
+            mv clang-r596125 /mnt/work/toolchain/clang-r596125
+          else
+            git fetch --depth=1 origin refs/heads/android17-release:refs/remotes/origin/android17-release 2>/dev/null || true
+            git checkout origin/android17-release -- clang-r596125 2>/dev/null || true
+            mv clang-r596125 /mnt/work/toolchain/clang-r596125
+          fi
+
+          cd /mnt/work
+          rm -rf /mnt/work/toolchain/aosp-clang-repo
+          /mnt/work/toolchain/clang-r596125/bin/clang --version
+
+          # Clonar el árbol del kernel de rhode (4.19.325-cip136-st20)
           git clone --depth=1 -b lineage-23.2 https://github.com/LineageOS/android_kernel_motorola_sm6225.git /mnt/work/kernel
 
       - name: Aplicar parche spoof uname release para bpfloader (commit 1cfc951) en kernel/sys.c
