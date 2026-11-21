@@ -1,0 +1,119 @@
+name: "Compilar Kernel 4.19.325 (rhode) con BPF Uname Spoof"
+
+on:
+  workflow_dispatch:
+    inputs:
+      spoofed_release:
+        description: "Versión uname reportada a bpfloader (ej. 5.15.148-android13-8-g000000000000)"
+        required: true
+        default: "5.15.148-android13-8-g000000000000"
+        type: string
+      evox_boot_url:
+        description: "URL del boot.img original de Evolution X (en tu Release evox-extracted)"
+        required: true
+        default: "https://github.com/dantedddlh-crypto/HyperOS4-Moto-G52-Port/releases/download/evox-extracted/boot.img"
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-kernel:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repositorio
+        uses: actions/checkout@v4
+
+      - name: Preparar /mnt/work, dependencias y magiskboot
+        run: |
+          sudo mkdir -p /mnt/work/tools /mnt/work/toolchain /mnt/work/kernel
+          sudo chown -R $USER:$USER /mnt/work
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential ccache curl flex git libncurses5-dev libssl-dev libelf-dev python3 python-is-python3 wget xz-utils zip zstd cpio p7zip-full
+
+          curl -fL "https://github.com/topjohnwu/Magisk/releases/download/v28.1/Magisk-v28.1.apk" -o /mnt/work/magisk.apk
+          unzip -p /mnt/work/magisk.apk lib/x86_64/libmagiskboot.so > /mnt/work/tools/magiskboot
+          chmod +x /mnt/work/tools/magiskboot
+          rm -f /mnt/work/magisk.apk
+
+      - name: Descargar AOSP Clang r596125 y clonar android_kernel_motorola_sm6225 (lineage-23.2)
+        run: |
+          mkdir -p /mnt/work/toolchain/clang-r596125
+          curl -fL "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/clang-r596125.tar.gz" -o /mnt/work/clang.tar.gz
+          tar -xzf /mnt/work/clang.tar.gz -C /mnt/work/toolchain/clang-r596125
+          rm -f /mnt/work/clang.tar.gz
+
+          git clone --depth=1 -b lineage-23.2 https://github.com/LineageOS/android_kernel_motorola_sm6225.git /mnt/work/kernel
+
+      - name: Aplicar parche spoof uname release para bpfloader (commit 1cfc951) en kernel/sys.c
+        run: |
+          cd /mnt/work/kernel
+          python3 - << 'EOF'
+          with open("kernel/sys.c", "r") as f:
+              content = f.read()
+
+          target = "if (copy_to_user(name, &tmp, sizeof(tmp)))"
+          spoof_val = "${{ github.event.inputs.spoofed_release }}"
+          patch = f'\tstrscpy(tmp.release, "{spoof_val}", sizeof(tmp.release));\n\t{target}'
+
+          assert target in content, "No se encontró copy_to_user en SYSCALL_DEFINE1(newuname)"
+          content = content.replace(target, patch, 1)
+
+          with open("kernel/sys.c", "w") as f:
+              f.write(content)
+          EOF
+          echo "=== Diff aplicado en kernel/sys.c ==="
+          git diff kernel/sys.c
+
+      - name: Compilar kernel (rhode_defconfig) con AOSP Clang r596125
+        run: |
+          cd /mnt/work/kernel
+          export PATH="/mnt/work/toolchain/clang-r596125/bin:$PATH"
+          export ARCH=arm64
+          export SUBARCH=arm64
+
+          make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 rhode_defconfig
+          make -j$(nproc --all) O=out \
+            ARCH=arm64 \
+            CC=clang \
+            LD=ld.lld \
+            AR=llvm-ar \
+            NM=llvm-nm \
+            OBJCOPY=llvm-objcopy \
+            OBJDUMP=llvm-objdump \
+            STRIP=llvm-strip \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+            Image.gz-dtb dtbs
+
+          ls -lh out/arch/arm64/boot/Image.gz-dtb
+
+      - name: Reempaquetar boot_hyperos_bpf.img con el ramdisk de Evolution X
+        run: |
+          mkdir -p /mnt/work/boot_repack /mnt/work/out_release
+          cd /mnt/work/boot_repack
+
+          if curl -fL "${{ github.event.inputs.evox_boot_url }}" -o boot_orig.img 2>/dev/null; then
+            echo "Descargado boot.img directo"
+          else
+            curl -fL "${{ github.event.inputs.evox_boot_url }}.zst" -o boot_orig.img.zst
+            zstd -d boot_orig.img.zst -o boot_orig.img
+          fi
+
+          /mnt/work/tools/magiskboot unpack boot_orig.img
+          cp -f /mnt/work/kernel/out/arch/arm64/boot/Image.gz-dtb kernel
+          /mnt/work/tools/magiskboot repack boot_orig.img /mnt/work/out_release/boot_hyperos_bpf.img
+          cp -f /mnt/work/kernel/out/arch/arm64/boot/Image.gz-dtb /mnt/work/out_release/Image.gz-dtb
+
+          ls -lh /mnt/work/out_release/
+
+      - name: Publicar boot_hyperos_bpf.img en GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: kernel-rhode-bpf-spoof
+          name: "Kernel 4.19.325 (rhode) - BPF Uname Spoof (5.15.148)"
+          files: |
+            /mnt/work/out_release/boot_hyperos_bpf.img
+            /mnt/work/out_release/Image.gz-dtb
