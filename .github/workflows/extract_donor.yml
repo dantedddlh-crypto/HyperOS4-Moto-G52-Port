@@ -1,11 +1,12 @@
-name: "Sesión 2: Extraer Donante HyperOS 4 (sapphiren)"
+name: "Sesión 2: Extraer Donante HyperOS 4 (spes)"
 
 on:
   workflow_dispatch:
     inputs:
       donor_url:
-        description: "URL directa del ZIP donante de HyperOS 4 (sapphiren)"
+        description: "URL directa del ZIP donante de HyperOS 4 (spes)"
         required: true
+        default: "https://pixeldrain.com/api/file/trR79icN"
         type: string
 
 permissions:
@@ -18,87 +19,129 @@ jobs:
       - name: Checkout repositorio
         uses: actions/checkout@v4
 
-      - name: Instalar herramientas de extracción (lpunpack, simg2img, erofs-utils)
+      - name: Preparar almacenamiento en /mnt/work e instalar herramientas
         run: |
+          sudo mkdir -p /mnt/work
+          sudo chown -R $USER:$USER /mnt/work
+          df -h /mnt/work
+
           sudo apt-get update
           sudo apt-get install -y erofs-utils android-sdk-libsparse-utils p7zip-full wget curl tar zstd file xxd unzip clang libc++-dev libc++abi-dev
-          mkdir -p tools
-          git clone --depth=1 https://github.com/LonelyFool/lpunpack_and_lpmake.git tools/src
-          find tools/src -name "*.cpp" -exec sed -i '1i #include <algorithm>' {} +
-          cd tools/src && ./make.sh && cp bin/* ../ && cd ../..
-          rm -rf tools/src
-          chmod +x tools/lpunpack tools/lpmake
-          echo "$PWD/tools" >> $GITHUB_PATH
+          mkdir -p /mnt/work/tools
+          git clone --depth=1 https://github.com/LonelyFool/lpunpack_and_lpmake.git /mnt/work/tools/src
+          find /mnt/work/tools/src -name "*.cpp" -exec sed -i '1i #include <algorithm>' {} +
+          cd /mnt/work/tools/src && ./make.sh && cp bin/* ../ && cd -
+          rm -rf /mnt/work/tools/src
+          chmod +x /mnt/work/tools/lpunpack /mnt/work/tools/lpmake
+          echo "/mnt/work/tools" >> $GITHUB_PATH
 
-      - name: Descargar y descomprimir ZIP de HyperMOD OS4.0.30.0
+      - name: Descargar y descomprimir ZIP de HyperOS 4 (spes)
         run: |
-          mkdir -p work/rom work/out work/super_extracted
-          curl -fL "${{ github.event.inputs.donor_url }}" -o work/donor.zip
-          7z x work/donor.zip -owork/rom/ -y
-          rm -f work/donor.zip
+          mkdir -p /mnt/work/rom /mnt/work/out /mnt/work/super_extracted
+          curl -fL --retry 3 "${{ github.event.inputs.donor_url }}" -o /mnt/work/donor.zip
+          ls -lh /mnt/work/donor.zip
+          7z x /mnt/work/donor.zip -o/mnt/work/rom/ -y
+          rm -f /mnt/work/donor.zip
+          find /mnt/work/rom -maxdepth 3 -ls
 
-      - name: Fusionar super.img.0..11 con simg2img y extraer particiones con lpunpack
+      - name: Extraer todas las particiones importantes (dinámicas y respaldo)
         run: |
-          # Ordenar numéricamente super.img.0, super.img.1 ... super.img.11
-          SUPER_PARTS=$(ls -v work/rom/images/super.img.*)
-          echo "Fragmentos encontrados:"
-          echo "$SUPER_PARTS"
+          IMG_DIR=$(find /mnt/work/rom -type d -name "images" | head -n 1)
+          [ -z "$IMG_DIR" ] && IMG_DIR="/mnt/work/rom"
+          echo "Directorio de imágenes detectado: $IMG_DIR"
 
-          simg2img $SUPER_PARTS work/super_raw.img
-          rm -rf work/rom
-          ls -lh work/super_raw.img
+          # Caso 1: super.img fragmentado (super.img.0, super.img.1, ...)
+          if ls "$IMG_DIR"/super.img.* >/dev/null 2>&1; then
+            SUPER_PARTS=$(ls -v "$IMG_DIR"/super.img.*)
+            echo "Fusionando fragmentos: $SUPER_PARTS"
+            simg2img $SUPER_PARTS /mnt/work/super_raw.img
+            lpunpack /mnt/work/super_raw.img /mnt/work/super_extracted/
+            rm -f /mnt/work/super_raw.img
 
-          lpunpack work/super_raw.img work/super_extracted/
-          rm -f work/super_raw.img
-          ls -lh work/super_extracted/
+          # Caso 2: super.img único (sparse o raw)
+          elif [ -f "$IMG_DIR/super.img" ]; then
+            if file "$IMG_DIR/super.img" | grep -qi "sparse"; then
+              simg2img "$IMG_DIR/super.img" /mnt/work/super_raw.img
+              lpunpack /mnt/work/super_raw.img /mnt/work/super_extracted/
+              rm -f /mnt/work/super_raw.img
+            else
+              lpunpack "$IMG_DIR/super.img" /mnt/work/super_extracted/
+            fi
 
-          for part in system product system_ext mi_ext; do
-            FOUND=$(ls work/super_extracted/${part}*.img 2>/dev/null | head -n 1 || true)
+          # Caso 3: Imágenes individuales sueltas dentro de images/
+          else
+            cp -f "$IMG_DIR"/*.img /mnt/work/super_extracted/ 2>/dev/null || true
+          fi
+
+          # Copiar también imágenes de arranque/hardware que vengan fuera de super (boot, dtbo, etc.)
+          for extra in boot dtbo vendor_boot vbmeta vbmeta_system; do
+            if [ -f "$IMG_DIR/${extra}.img" ] && [ ! -f "/mnt/work/super_extracted/${extra}.img" ]; then
+              cp -f "$IMG_DIR/${extra}.img" /mnt/work/super_extracted/
+            fi
+          done
+
+          rm -rf /mnt/work/rom
+          ls -lh /mnt/work/super_extracted/
+
+          # Recolectar todas las particiones importantes (preferencia por slot _a o sin sufijo)
+          for part in system product system_ext mi_ext vendor odm boot dtbo vendor_boot; do
+            FOUND=$(ls /mnt/work/super_extracted/${part}.img /mnt/work/super_extracted/${part}_a.img 2>/dev/null | head -n 1 || true)
             if [ -n "$FOUND" ] && [ -s "$FOUND" ]; then
-              mv "$FOUND" "work/out/${part}.img"
-            fi
-          done
-          rm -rf work/super_extracted
-          ls -lh work/out/
-
-      - name: Extraer JARs del framework y build.prop desde EROFS/EXT4 (Sesión 3)
-        run: |
-          mkdir -p work/jars_for_patch
-          for part in system product system_ext; do
-            IMG="work/out/${part}.img"
-            if [ -f "$IMG" ]; then
-              echo "Extrayendo archivos clave de ${part}.img..."
-              mkdir -p "work/mnt_${part}" "work/jars_for_patch/${part}"
-              # Intentar montaje o extracción nativa EROFS
-              if sudo mount -o ro,loop "$IMG" "work/mnt_${part}" 2>/dev/null; then
-                find "work/mnt_${part}" -maxdepth 4 \( \
-                  -name "services.jar" -o \
-                  -name "framework.jar" -o \
-                  -name "miui-services.jar" -o \
-                  -name "build.prop" \
-                \) -exec cp --parents {} "work/jars_for_patch/${part}/" \; 2>/dev/null || true
-                sudo umount "work/mnt_${part}"
+              echo "Guardando ${part}.img desde $FOUND"
+              if file "$FOUND" | grep -qi "sparse"; then
+                simg2img "$FOUND" "/mnt/work/out/${part}.img"
               else
-                extract.erofs -i "$IMG" -o "work/mnt_${part}" -x || 7z x "$IMG" -o"work/mnt_${part}" -y || true
-                find "work/mnt_${part}" -maxdepth 4 \( \
-                  -name "services.jar" -o \
-                  -name "framework.jar" -o \
-                  -name "miui-services.jar" -o \
-                  -name "build.prop" \
-                \) -exec cp --parents {} "work/jars_for_patch/${part}/" \; 2>/dev/null || true
+                mv "$FOUND" "/mnt/work/out/${part}.img"
               fi
-              rm -rf "work/mnt_${part}"
             fi
           done
-          echo "=== Archivos extraídos para Sesión 3 ==="
-          find work/jars_for_patch -type f
-          tar -czf work/jars_and_props_hyperos4.tar.gz -C work/jars_for_patch .
-          ls -lh work/jars_and_props_hyperos4.tar.gz
+
+          rm -rf /mnt/work/super_extracted
+          ls -lh /mnt/work/out/
+
+      - name: Extraer JARs del framework, build.prop y validar soporte 32-bit
+        run: |
+          mkdir -p /mnt/work/jars_for_patch
+          for part in system product system_ext vendor; do
+            IMG="/mnt/work/out/${part}.img"
+            if [ -f "$IMG" ]; then
+              echo "Inspeccionando ${part}.img..."
+              mkdir -p "/mnt/work/mnt_${part}" "/mnt/work/jars_for_patch/${part}"
+              if sudo mount -o ro,loop "$IMG" "/mnt/work/mnt_${part}" 2>/dev/null; then
+                MOUNTED=1
+              else
+                MOUNTED=0
+                extract.erofs -i "$IMG" -o "/mnt/work/mnt_${part}" -x 2>/dev/null || 7z x "$IMG" -o"/mnt/work/mnt_${part}" -y >/dev/null 2>&1 || true
+              fi
+
+              if [ "$part" = "system" ]; then
+                echo "=== Verificación de arquitectura 64_32 en system ==="
+                find "/mnt/work/mnt_${part}" -name "app_process*" -ls || true
+              fi
+
+              find "/mnt/work/mnt_${part}" -maxdepth 4 \( \
+                -name "services.jar" -o \
+                -name "framework.jar" -o \
+                -name "miui-services.jar" -o \
+                -name "build.prop" \
+              \) -exec cp --parents {} "/mnt/work/jars_for_patch/${part}/" \; 2>/dev/null || true
+
+              if [ "$MOUNTED" -eq 1 ]; then
+                sudo umount "/mnt/work/mnt_${part}"
+              fi
+              rm -rf "/mnt/work/mnt_${part}"
+            fi
+          done
+
+          echo "=== Archivos extraídos para referencia ==="
+          find /mnt/work/jars_for_patch -type f
+          tar -czf /mnt/work/jars_and_props_spes.tar.gz -C /mnt/work/jars_for_patch .
+          ls -lh /mnt/work/jars_and_props_spes.tar.gz
 
       - name: Comprimir particiones individuales por debajo de 1.8 GB
         run: |
-          cd work/out
-          for img in system.img product.img system_ext.img mi_ext.img; do
+          cd /mnt/work/out
+          for img in *.img; do
             if [ -f "$img" ]; then
               echo "Comprimiendo $img..."
               zstd -T0 -9 "$img" -o "${img}.zst"
@@ -113,11 +156,11 @@ jobs:
           done
           ls -lh
 
-      - name: Publicar particiones base de HyperOS 4 en GitHub Release
+      - name: Publicar particiones base de HyperOS 4 (spes) en GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: donor-hyperos4-base
-          name: "Donante HyperOS 4 (sapphiren OS4.0.30.0) - Particiones y JARs"
+          tag_name: donor-hyperos4-spes
+          name: "Donante HyperOS 4 (spes OS4.0.0.22) - Particiones y JARs"
           files: |
-            work/out/*
-            work/jars_and_props_hyperos4.tar.gz
+            /mnt/work/out/*
+            /mnt/work/jars_and_props_spes.tar.gz
