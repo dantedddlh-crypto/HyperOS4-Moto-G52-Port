@@ -9,9 +9,9 @@ on:
         default: "5.15.148-android13-8-g000000000000"
         type: string
       evox_boot_url:
-        description: "URL del boot.img original de Evolution X (en tu Release evox-extracted)"
+        description: "URL del boot_evox.img.zst original de Evolution X (en tu Release evox-extracted)"
         required: true
-        default: "https://github.com/dantedddlh-crypto/HyperOS4-Moto-G52-Port/releases/download/evox-extracted/boot.img"
+        default: "https://github.com/dantedddlh-crypto/HyperOS4-Moto-G52-Port/releases/download/evox-extracted/boot_evox.img.zst"
         type: string
 
 permissions:
@@ -134,19 +134,41 @@ jobs:
 
       - name: Reempaquetar boot_hyperos_bpf.img con el ramdisk de Evolution X
         run: |
+          set -euo pipefail
           mkdir -p /mnt/work/boot_repack /mnt/work/out_release
           cd /mnt/work/boot_repack
 
-          if curl -fL "${{ github.event.inputs.evox_boot_url }}" -o boot_orig.img 2>/dev/null; then
-            echo "Descargado boot.img directo"
+          DOWNLOADED=""
+          for URL in \
+            "${{ github.event.inputs.evox_boot_url }}" \
+            "https://github.com/dantedddlh-crypto/HyperOS4-Moto-G52-Port/releases/download/evox-extracted/boot_evox.img.zst" \
+            "https://github.com/dantedddlh-crypto/HyperOS4-Moto-G52-Port/releases/download/evox-source/boot_evox.img.zst"; do
+            if curl -fL --retry 3 "$URL" -o boot_download 2>/dev/null; then
+              DOWNLOADED="$URL"
+              break
+            fi
+          done
+          [ -n "$DOWNLOADED" ] || { echo "No se pudo descargar ninguna imagen boot válida de Evolution X"; exit 1; }
+          echo "Imagen base descargada: $DOWNLOADED"
+
+          if file boot_download | grep -qi "Zstandard"; then
+            zstd -d -f boot_download -o boot_orig.img
           else
-            curl -fL "${{ github.event.inputs.evox_boot_url }}.zst" -o boot_orig.img.zst
-            zstd -d boot_orig.img.zst -o boot_orig.img
+            cp -f boot_download boot_orig.img
           fi
 
-          /mnt/work/tools/magiskboot unpack boot_orig.img
+          file boot_orig.img
+          ls -lh boot_orig.img
+
+          rm -rf boot_repack_work
+          mkdir boot_repack_work
+          cd boot_repack_work
+
+          /mnt/work/tools/magiskboot unpack ../boot_orig.img
           cp -f /mnt/work/kernel/out/arch/arm64/boot/Image.gz-dtb kernel
-          /mnt/work/tools/magiskboot repack boot_orig.img /mnt/work/out_release/boot_hyperos_bpf.img
+
+          /mnt/work/tools/magiskboot repack ../boot_orig.img /mnt/work/out_release/boot_hyperos_bpf.img
+
           cp -f /mnt/work/kernel/out/arch/arm64/boot/Image.gz-dtb /mnt/work/out_release/Image.gz-dtb
 
           ls -lh /mnt/work/out_release/
