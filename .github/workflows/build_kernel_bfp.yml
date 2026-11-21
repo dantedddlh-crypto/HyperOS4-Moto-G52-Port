@@ -8,11 +8,6 @@ on:
         required: true
         default: "5.15.148-android13-8-g000000000000"
         type: string
-      evox_boot_url:
-        description: "URL del boot_evox.img.zst original de Evolution X (en tu Release evox-extracted)"
-        required: true
-        default: "https://github.com/dantedddlh-crypto/HyperOS4-Moto-G52-Port/releases/download/evox-extracted/boot_evox.img.zst"
-        type: string
 
 permissions:
   contents: write
@@ -36,29 +31,33 @@ jobs:
           chmod +x /mnt/work/tools/magiskboot
           rm -f /mnt/work/magisk.apk
 
-      - name: Descargar AOSP Clang r596125 y clonar android_kernel_motorola_sm6225 (lineage-23.2)
+      - name: Descargar AOSP Clang 22 y clonar android_kernel_motorola_sm6225 (lineage-23.2)
         run: |
           mkdir -p /mnt/work/toolchain/clang-r596125
 
-          # Descarga rápida vía CDN de GitHub (tarda ~10 segundos)
-          CLANG_URLS=(
-            "https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r596125/archive/refs/heads/lineage-23.2.tar.gz"
-            "https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r596125/archive/refs/heads/lineage-23.1.tar.gz"
-            "https://github.com/LineageOS/android_prebuilts_clang_kernel_linux-x86_clang-r584948/archive/refs/heads/lineage-23.2.tar.gz"
-          )
+          # Obtener automáticamente el último release de Clang 22 (o el más reciente disponible) desde GitHub CDN
+          CLANG_URL=$(curl -s "https://api.github.com/repos/ZyCromerZ/Clang/releases?per_page=10" \
+            | grep -oE '"browser_download_url":\s*"[^"]+Clang-22[^"]*\.tar\.gz"' \
+            | head -n 1 | cut -d'"' -f4)
 
-          DOWNLOADED=0
-          for url in "${CLANG_URLS[@]}"; do
-            echo "Probando mirror: $url"
-            if curl -fL --connect-timeout 15 "$url" -o /mnt/work/clang.tar.gz; then
-              tar -xzf /mnt/work/clang.tar.gz --strip-components=1 -C /mnt/work/toolchain/clang-r596125
-              rm -f /mnt/work/clang.tar.gz
-              DOWNLOADED=1
-              break
-            fi
-          done
+          # Fallback al último release general de ZyCromerZ/Clang si aún no hay tag Clang-22
+          if [ -z "$CLANG_URL" ]; then
+            CLANG_URL=$(curl -s "https://api.github.com/repos/ZyCromerZ/Clang/releases/latest" \
+              | grep -oE '"browser_download_url":\s*"[^"]+\.tar\.gz"' \
+              | head -n 1 | cut -d'"' -f4)
+          fi
 
-          [ "$DOWNLOADED" -eq 1 ] || { echo "Error: No se pudo descargar AOSP Clang"; exit 1; }
+          echo "Descargando toolchain desde: $CLANG_URL"
+          curl -fL "$CLANG_URL" -o /mnt/work/clang.tar.gz
+          tar -xzf /mnt/work/clang.tar.gz -C /mnt/work/toolchain/clang-r596125
+          rm -f /mnt/work/clang.tar.gz
+
+          # Si el tar extrajo una subcarpeta raíz, mover su contenido a clang-r596125
+          if [ ! -f /mnt/work/toolchain/clang-r596125/bin/clang ]; then
+            SUBDIR=$(find /mnt/work/toolchain/clang-r596125 -maxdepth 2 -type f -name "clang" | head -n 1 | xargs dirname | xargs dirname)
+            mv "$SUBDIR"/* /mnt/work/toolchain/clang-r596125/
+          fi
+
           /mnt/work/toolchain/clang-r596125/bin/clang --version
 
           # Clonar el árbol del kernel de rhode (4.19.325-cip136-st20)
@@ -84,17 +83,13 @@ jobs:
           echo "=== Diff aplicado en kernel/sys.c ==="
           git diff kernel/sys.c
 
-      - name: Configurar y compilar kernel (rhode) con AOSP Clang r596125
+      - name: Configurar y compilar kernel (rhode) con Clang 22
         run: |
           cd /mnt/work/kernel
           export PATH="/mnt/work/toolchain/clang-r596125/bin:$PATH"
           export ARCH=arm64
           export SUBARCH=arm64
 
-          echo "=== Defconfigs disponibles en arch/arm64/configs/vendor ==="
-          find arch/arm64/configs -type f | sort
-
-          # Ensamblar configuración real de Motorola SM6225 (rhode)
           BASE_DEFCONFIG="vendor/bengal-perf_defconfig"
           [ ! -f "arch/arm64/configs/$BASE_DEFCONFIG" ] && BASE_DEFCONFIG="vendor/sm6225-perf_defconfig"
 
@@ -115,7 +110,6 @@ jobs:
             make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
           fi
 
-          # Compilar Image.gz-dtb y DTBs con los mismos flags de AOSP Clang r596125
           make -j$(nproc --all) O=out \
             ARCH=arm64 \
             CC=clang \
@@ -133,52 +127,50 @@ jobs:
 
           ls -lh out/arch/arm64/boot/Image.gz-dtb
 
-      - name: Reempaquetar boot_hyperos_bpf.img con el ramdisk de Evolution X
+      - name: Reempaquetar boot_hyperos_bpf.img y generar ZIP AnyKernel3
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
           mkdir -p /mnt/work/boot_repack /mnt/work/out_release
           cd /mnt/work/boot_repack
 
-          DOWNLOADED=""
-          for URL in \
-            "${{ github.event.inputs.evox_boot_url }}" \
-            "https://github.com/dantedddlh-crypto/HyperOS4-Moto-G52-Port/releases/download/evox-extracted/boot_evox.img.zst" \
-            "https://github.com/dantedddlh-crypto/HyperOS4-Moto-G52-Port/releases/download/evox-source/boot_evox.img.zst"; do
-            if curl -fL --retry 3 "$URL" -o boot_download 2>/dev/null; then
-              DOWNLOADED="$URL"
-              break
-            fi
-          done
-          [ -n "$DOWNLOADED" ] || { echo "No se pudo descargar ninguna imagen boot válida de Evolution X"; exit 1; }
-          echo "Imagen base descargada: $DOWNLOADED"
+          echo "=== Descargando boot_evox desde Release evox-extracted ==="
+          gh release download evox-extracted --pattern "*boot*" --dir /mnt/work/boot_repack || true
+          ls -lh /mnt/work/boot_repack
 
-          if file boot_download | grep -qi "Zstandard"; then
-            zstd -d -f boot_download -o boot_orig.img
-          else
-            cp -f boot_download boot_orig.img
+          if ls /mnt/work/boot_repack/*boot*.img.zst >/dev/null 2>&1; then
+            ZST_FILE=$(ls /mnt/work/boot_repack/*boot*.img.zst | head -n 1)
+            zstd -d "$ZST_FILE" -o boot_orig.img
+          elif ls /mnt/work/boot_repack/*boot*.img >/dev/null 2>&1; then
+            IMG_FILE=$(ls /mnt/work/boot_repack/*boot*.img | head -n 1)
+            cp -f "$IMG_FILE" boot_orig.img
           fi
 
-          file boot_orig.img
-          ls -lh boot_orig.img
+          if [ -f boot_orig.img ]; then
+            /mnt/work/tools/magiskboot unpack boot_orig.img
+            cp -f /mnt/work/kernel/out/arch/arm64/boot/Image.gz-dtb kernel
+            /mnt/work/tools/magiskboot repack boot_orig.img /mnt/work/out_release/boot_hyperos_bpf.img
+          fi
 
-          rm -rf boot_repack_work
-          mkdir boot_repack_work
-          cd boot_repack_work
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git /mnt/work/AnyKernel3
+          cd /mnt/work/AnyKernel3
+          rm -rf .git README.md
+          sed -i 's/do.devicecheck=1/do.devicecheck=0/g' anykernel.sh
+          sed -i 's/device.name1=maguro/device.name1=rhode/g' anykernel.sh
+          sed -i 's/device.name2=toro/device.name2=moto_g52/g' anykernel.sh
+          sed -i 's|BLOCK=/dev/block/platform/omap/omap_hsmmc.0/by-name/boot;|BLOCK=auto;|g' anykernel.sh
+          sed -i 's/IS_SLOT_DEVICE=0;/IS_SLOT_DEVICE=1;/g' anykernel.sh
 
-          /mnt/work/tools/magiskboot unpack ../boot_orig.img
-          cp -f /mnt/work/kernel/out/arch/arm64/boot/Image.gz-dtb kernel
-
-          /mnt/work/tools/magiskboot repack ../boot_orig.img /mnt/work/out_release/boot_hyperos_bpf.img
+          cp -f /mnt/work/kernel/out/arch/arm64/boot/Image.gz-dtb .
+          zip -r9 /mnt/work/out_release/AnyKernel3-rhode-4.19.325-bpf-spoof.zip ./*
 
           cp -f /mnt/work/kernel/out/arch/arm64/boot/Image.gz-dtb /mnt/work/out_release/Image.gz-dtb
-
           ls -lh /mnt/work/out_release/
 
-      - name: Publicar boot_hyperos_bpf.img en GitHub Release
+      - name: Publicar kernel y boot_hyperos_bpf.img en GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: kernel-rhode-bpf-spoof
           name: "Kernel 4.19.325 (rhode) - BPF Uname Spoof (5.15.148)"
           files: |
-            /mnt/work/out_release/boot_hyperos_bpf.img
-            /mnt/work/out_release/Image.gz-dtb
+            /mnt/work/out_release/*
