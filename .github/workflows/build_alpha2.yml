@@ -35,7 +35,7 @@ jobs:
           sudo mkdir -p /mnt/work/{downloads,images,mounts,vendor_dir,selinux_build,boot_repack,out,bin}
           sudo chown -R $USER:$USER /mnt/work
           sudo apt-get update
-          sudo apt-get install -y android-sdk-libsparse-utils attr build-essential flex bison libpcre2-dev e2fsprogs erofs-utils f2fs-tools p7zip-full python3 rsync selinux-utils zstd unzip wget curl
+          sudo apt-get install -y android-sdk-libsparse-utils attr build-essential clang libc++-dev libc++abi-dev flex bison libpcre2-dev e2fsprogs erofs-utils f2fs-tools p7zip-full python3 rsync selinux-utils zstd unzip wget curl
 
           # Compilar libsepol y secilc moderno apuntando a sus propias cabeceras (sin manuales xmlto)
           git clone --depth=1 https://github.com/SELinuxProject/selinux.git /mnt/work/selinux_src
@@ -50,15 +50,15 @@ jobs:
           sudo ldconfig
           test -x /usr/local/bin/secilc && echo "secilc moderno compilado e instalado correctamente"
 
-          # Descargar binario estático lpmake x86_64 funcional en /usr/local/bin/lpmake
-          curl -fL "https://github.com/LonelyFool/lpunpack_and_lpmake/releases/download/v1.0.2/lpunpack_and_lpmake_x86_64.tar.gz" -o /mnt/work/lptools.tar.gz || \
-          curl -fL "https://github.com/affggh/lptools/releases/download/v1.0/lpmake_linux_x86_64" -o /usr/local/bin/lpmake
-          if [ -s /mnt/work/lptools.tar.gz ]; then
-            tar -xzf /mnt/work/lptools.tar.gz -C /mnt/work/bin
-            LPMAKE_FOUND=$(find /mnt/work/bin -type f -name "lpmake" | head -n 1)
-            sudo cp -f "$LPMAKE_FOUND" /usr/local/bin/lpmake
-          fi
-          sudo chmod +x /usr/local/bin/lpmake
+          # Compilar lpmake desde su fuente, igual que en el flujo de extracción
+          rm -rf /mnt/work/lptools_src
+          git clone --depth=1 https://github.com/LonelyFool/lpunpack_and_lpmake.git /mnt/work/lptools_src
+          find /mnt/work/lptools_src -name "*.cpp" -exec sed -i '1i #include <algorithm>' {} +
+          cd /mnt/work/lptools_src
+          ./make.sh
+          sudo install -m 755 bin/lpmake /usr/local/bin/lpmake
+          cd $GITHUB_WORKSPACE
+          test -x /usr/local/bin/lpmake
           /usr/local/bin/lpmake --help | head -n 3
 
           curl -fL "https://github.com/topjohnwu/Magisk/releases/download/v31.1/Magisk-v31.1.apk" -o /mnt/work/magisk.apk
