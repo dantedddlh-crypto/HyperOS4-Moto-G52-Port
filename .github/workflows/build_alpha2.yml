@@ -50,15 +50,12 @@ jobs:
           sudo ldconfig
           test -x /usr/local/bin/secilc && echo "secilc moderno compilado e instalado correctamente"
 
-          # Descargar lpmake y e2fsdroid estáticos si no vienen en el PATH de Jammy
-          if ! command -v lpmake >/dev/null 2>&1 || ! command -v e2fsdroid >/dev/null 2>&1; then
-            curl -fL "https://github.com/LonelyFool/lpunpack_and_lpmake/releases/download/v1.0/lpunpack_and_lpmake_x86_64.tar.gz" -o /mnt/work/lptools.tar.gz 2>/dev/null || true
-            if [ -s /mnt/work/lptools.tar.gz ]; then
-              tar -xzf /mnt/work/lptools.tar.gz -C /mnt/work/bin
-              chmod +x /mnt/work/bin/*
-              echo "/mnt/work/bin" >> $GITHUB_PATH
-            fi
-          fi
+          # Compilar lpmake nativo x86_64 desde fuente (cero fallos de URL de releases)
+          git clone --depth=1 https://github.com/LonelyFool/lpunpack_and_lpmake.git /mnt/work/lptools_src
+          make -C /mnt/work/lptools_src -j$(nproc)
+          LPMAKE_BIN=$(find /mnt/work/lptools_src -type f -name "lpmake" -executable | head -n 1)
+          test -n "$LPMAKE_BIN" && sudo cp -f "$LPMAKE_BIN" /usr/local/bin/lpmake && sudo chmod +x /usr/local/bin/lpmake
+          which lpmake
 
           curl -fL "https://github.com/topjohnwu/Magisk/releases/download/v31.1/Magisk-v31.1.apk" -o /mnt/work/magisk.apk
           unzip -p /mnt/work/magisk.apk lib/x86_64/libmagiskboot.so > /mnt/work/magiskboot
