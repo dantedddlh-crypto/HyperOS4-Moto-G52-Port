@@ -1,114 +1,240 @@
-name: Build HyperOS 4 Alpha 2 (Option A - Raw EROFS + mi_ext + Precompiled SEPolicy)
+name: "Ensamblar super_hyperos.img (Alpha 2 - lpmake 7583301632 + EROFS/VNDK30 + SELinux SHA256 + Módulos .ko)"
 
 on:
   workflow_dispatch:
     inputs:
       donor_tag:
-        description: 'Release tag de imágenes HyperOS 4 donor'
+        description: "Tag del Release con las particiones del donante HyperOS 4"
         required: true
-        default: 'donor-hyperos4-base'
+        default: "donor-hyperos4-spes"
+        type: string
       evox_tag:
-        description: 'Release tag de Evolution X Base'
+        description: "Tag del Release con vendor_evox y boot_evox extraídos"
         required: true
-        default: 'evox-source'
-      output_tag:
-        description: 'Release tag destino para Alpha 2'
+        default: "evox-extracted"
+        type: string
+      kernel_tag:
+        description: "Tag del Release con Image.gz-dtb y rhode-kernel-modules.tar.gz"
         required: true
-        default: 'hyperos4-rhode-alpha2'
+        default: "kernel-rhode-bpf-spoof"
+        type: string
+
+permissions:
+  contents: write
 
 jobs:
-  validate-and-patch:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
+  build-super:
+    runs-on: ubuntu-22.04
     steps:
-      - name: Liberar espacio en disco del runner
+      - name: Checkout repositorio
+        uses: actions/checkout@v4
+
+      - name: Liberar espacio en runner e instalar herramientas Android / EROFS / SELinux
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android
-          sudo mkdir -p /mnt/work
+          sudo mkdir -p /mnt/work/{downloads,images,mounts,vendor_dir,selinux_build,boot_repack,out}
           sudo chown -R $USER:$USER /mnt/work
-
-      - name: Instalar herramientas Android / EROFS / SELinux / Bootimg
-        run: |
           sudo apt-get update
-          sudo apt-get install -y zstd erofs-utils android-sdk-libsparse-utils secilc cpio lz4 python3-pip git wget unzip
-          git clone --depth=1 https://android.googlesource.com/platform/system/tools/mkbootimg /mnt/work/mkbootimg
-          sudo chmod +x /mnt/work/mkbootimg/unpack_bootimg.py /mnt/work/mkbootimg/mkbootimg.py
+          sudo apt-get install -y android-sdk-libsparse-utils android-sdk-ext4-utils attr e2fsprogs erofs-utils f2fs-tools p7zip-full python3 rsync selinux-utils secilc zstd unzip wget curl
 
-      - name: Descargar assets de evox-source y donor-hyperos4-base
+          curl -fL "https://github.com/topjohnwu/Magisk/releases/download/v28.1/Magisk-v28.1.apk" -o /mnt/work/magisk.apk
+          unzip -p /mnt/work/magisk.apk lib/x86_64/libmagiskboot.so > /mnt/work/magiskboot
+          chmod +x /mnt/work/magiskboot
+          rm -f /mnt/work/magisk.apk
+
+      - name: Descargar assets y reempaquetar boot_hyperos_bpf.img
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir -p /mnt/work/evox /mnt/work/donor /mnt/work/out
-          gh release download "${{ github.event.inputs.evox_tag }}" \
-            -R "${{ github.repository }}" \
-            -p "vendor_evox.img.zst" \
-            -p "vendor_boot_evox.img.zst" \
-            -p "vbmeta_evox.img.zst" \
-            -p "vbmeta_system_evox.img.zst" \
-            -D /mnt/work/evox
-          gh release download "${{ github.event.inputs.donor_tag }}" \
-            -R "${{ github.repository }}" \
-            -D /mnt/work/donor
+          gh release download "${{ github.event.inputs.donor_tag }}" --repo "${{ github.repository }}" --dir /mnt/work/downloads/donor
+          gh release download "${{ github.event.inputs.evox_tag }}" --repo "${{ github.repository }}" --dir /mnt/work/downloads/evox
+          gh release download "${{ github.event.inputs.kernel_tag }}" --repo "${{ github.repository }}" --dir /mnt/work/downloads/kernel
 
-      - name: Descomprimir imágenes base
+          cd /mnt/work/boot_repack
+          BOOT_ZST=$(ls /mnt/work/downloads/evox/*boot*.img.zst | head -n 1)
+          zstd -d "$BOOT_ZST" -o boot_orig.img
+          /mnt/work/magiskboot unpack boot_orig.img
+          cp -f /mnt/work/downloads/kernel/Image.gz-dtb kernel
+          /mnt/work/magiskboot repack boot_orig.img /mnt/work/out/boot_hyperos_bpf.img
+          ls -lh /mnt/work/out/boot_hyperos_bpf.img
+
+      - name: Descomprimir y reconstruir particiones base
         run: |
-          cd /mnt/work/evox
-          for f in *.zst; do [ -f "$f" ] && zstd -d "$f" -o "${f%.zst}"; done
+          cd /mnt/work/images
 
-          cd /mnt/work/donor
-          # 1. Si product viene dividido como product.img.zst.part_*, unir primero y luego descomprimir
-          if ls product.img.zst.part_* 1> /dev/null 2>&1; then
-            cat product.img.zst.part_* > product.img.zst
+          if ls /mnt/work/downloads/donor/product.img.zst.part_* >/dev/null 2>&1; then
+            cat /mnt/work/downloads/donor/product.img.zst.part_* > product.img.zst
+            zstd -d product.img.zst -o product.img
+            rm -f product.img.zst
+          elif [ -f /mnt/work/downloads/donor/product.img.zst ]; then
+            zstd -d /mnt/work/downloads/donor/product.img.zst -o product.img
           fi
-          # 2. Descomprimir todos los .zst
-          for f in *.zst; do [ -f "$f" ] && zstd -d "$f" -o "${f%.zst}"; done
-          # 3. Por si vino dividido ya descomprimido como product.img.part_*
-          if ls product.img.part_* 1> /dev/null 2>&1; then
-            cat product.img.part_* > product.img
-          fi
-          ls -lh /mnt/work/evox /mnt/work/donor
 
-      - name: 1. Compilar precompiled_sepolicy y calcular hashes SHA-256 reales de HyperOS 4
+          zstd -d /mnt/work/downloads/donor/system.img.zst -o system.img
+          zstd -d /mnt/work/downloads/donor/system_ext.img.zst -o system_ext.img
+
+          if [ -f /mnt/work/downloads/donor/mi_ext.img.zst ]; then
+            zstd -d /mnt/work/downloads/donor/mi_ext.img.zst -o mi_ext.img
+          fi
+
+          VENDOR_ZST=$(ls /mnt/work/downloads/evox/*vendor*.img.zst | head -n 1)
+          zstd -d "$VENDOR_ZST" -o vendor_orig.img
+
+          for img in system system_ext product vendor_orig mi_ext; do
+            [ -f "${img}.img" ] || continue
+            if file "${img}.img" | grep -q "Android sparse image"; then
+              simg2img "${img}.img" "${img}_raw.img"
+              mv "${img}_raw.img" "${img}.img"
+            fi
+          done
+
+      - name: Debloat, fusión de mi_ext en product, ajustes DPI 400 / 90Hz y compactación
         run: |
-          mkdir -p /mnt/work/ext_sys /mnt/work/ext_ext /mnt/work/ext_prod /mnt/work/ext_mi /mnt/work/ext_ven /mnt/work/selinux_build
+          mkdir -p /mnt/work/mounts/{prod_rw,sys_rw,sysext_ro,miext_ro}
 
-          # Extraer solo las carpetas etc/selinux con fsck.erofs (sin usar mount -o loop)
-          fsck.erofs --extract=/mnt/work/ext_sys --extract-path=/system/etc/selinux /mnt/work/donor/system.img || fsck.erofs --extract=/mnt/work/ext_sys /mnt/work/donor/system.img
-          fsck.erofs --extract=/mnt/work/ext_ext /mnt/work/donor/system_ext.img
-          fsck.erofs --extract=/mnt/work/ext_prod /mnt/work/donor/product.img
-          fsck.erofs --extract=/mnt/work/ext_mi /mnt/work/donor/mi_ext.img
-          fsck.erofs --extract=/mnt/work/ext_ven /mnt/work/evox/vendor_evox.img
+          # Si el donante viene en EROFS, convertir product y system a ext4 editable o extraerlos
+          for part in system system_ext product; do
+            if file /mnt/work/images/${part}.img | grep -qi "EROFS"; then
+              echo "Extrayendo $part desde EROFS a ext4..."
+              mkdir -p /mnt/work/erofs_${part}
+              fsck.erofs --extract=/mnt/work/erofs_${part} /mnt/work/images/${part}.img
+              USED_KB=$(du -sk /mnt/work/erofs_${part} | awk '{print $1}')
+              SIZE_B=$(( ((USED_KB + 1048576) * 1024 / 4096) * 4096 ))
+              rm -f /mnt/work/images/${part}.img
+              truncate -s "$SIZE_B" /mnt/work/images/${part}.img
+              mke2fs -t ext4 -b 4096 -L "$part" -O ^has_journal /mnt/work/images/${part}.img
+              sudo e2fsdroid -e -a "/$part" -f /mnt/work/erofs_${part} /mnt/work/images/${part}.img
+              rm -rf /mnt/work/erofs_${part}
+            fi
+          done
 
-          VENDOR_VER=$(cat /mnt/work/ext_ven/etc/selinux/plat_sepolicy_vers.txt | tr -d '[:space:]')
+          truncate -s +1200M /mnt/work/images/product.img
+          e2fsck -fy /mnt/work/images/product.img || true
+          resize2fs /mnt/work/images/product.img
+
+          truncate -s +512M /mnt/work/images/system.img
+          e2fsck -fy /mnt/work/images/system.img || true
+          resize2fs /mnt/work/images/system.img
+
+          sudo mount -o rw,loop /mnt/work/images/product.img /mnt/work/mounts/prod_rw
+          sudo rm -rf \
+            /mnt/work/mounts/prod_rw/app/MiBrowser* \
+            /mnt/work/mounts/prod_rw/app/MiVideo* \
+            /mnt/work/mounts/prod_rw/app/Music* \
+            /mnt/work/mounts/prod_rw/app/GameCenter* \
+            /mnt/work/mounts/prod_rw/app/YouTube* \
+            /mnt/work/mounts/prod_rw/app/Maps* \
+            /mnt/work/mounts/prod_rw/app/Gmail2* \
+            /mnt/work/mounts/prod_rw/app/Photos* \
+            /mnt/work/mounts/prod_rw/app/Drive* \
+            /mnt/work/mounts/prod_rw/app/Videos* \
+            /mnt/work/mounts/prod_rw/app/Velvet* \
+            /mnt/work/mounts/prod_rw/priv-app/MiBrowser* \
+            /mnt/work/mounts/prod_rw/priv-app/GameCenter* \
+            /mnt/work/mounts/prod_rw/priv-app/Velvet* \
+            /mnt/work/mounts/prod_rw/data-app/*
+
+          if [ -f /mnt/work/images/mi_ext.img ]; then
+            if file /mnt/work/images/mi_ext.img | grep -qi "EROFS"; then
+              fsck.erofs --extract=/mnt/work/mounts/miext_ro /mnt/work/images/mi_ext.img
+              sudo cp -rn /mnt/work/mounts/miext_ro/* /mnt/work/mounts/prod_rw/ 2>/dev/null || true
+              rm -rf /mnt/work/mounts/miext_ro
+            else
+              sudo mount -o ro,loop /mnt/work/images/mi_ext.img /mnt/work/mounts/miext_ro
+              sudo cp -rn /mnt/work/mounts/miext_ro/* /mnt/work/mounts/prod_rw/ 2>/dev/null || true
+              sudo umount /mnt/work/mounts/miext_ro
+            fi
+          fi
+
+          PROD_PROP="/mnt/work/mounts/prod_rw/etc/build.prop"
+          if [ -f "$PROD_PROP" ]; then
+            sudo sed -i '/ro.sf.lcd_density=/d' "$PROD_PROP"
+            echo "ro.sf.lcd_density=400" | sudo tee -a "$PROD_PROP" >/dev/null
+            echo "ro.surface_flinger.use_smart_90_for_video=true" | sudo tee -a "$PROD_PROP" >/dev/null
+          fi
+          sudo umount /mnt/work/mounts/prod_rw
+
+          sudo mount -o rw,loop /mnt/work/images/system.img /mnt/work/mounts/sys_rw
+          sudo rm -rf \
+            /mnt/work/mounts/sys_rw/system/app/MSA* \
+            /mnt/work/mounts/sys_rw/system/app/AnalyticsCore* \
+            /mnt/work/mounts/sys_rw/system/priv-app/MSA* \
+            /mnt/work/mounts/sys_rw/system/data-app/*
+          sudo umount /mnt/work/mounts/sys_rw
+
+          for img in system system_ext product; do
+            e2fsck -fy /mnt/work/images/${img}.img || true
+            resize2fs -M /mnt/work/images/${img}.img
+          done
+
+      - name: Extraer vendor_evox, inyectar módulos .ko, compilar SELinux + SHA-256 y reempaquetar vendor
+        run: |
+          IS_VENDOR_EROFS=0
+          if file /mnt/work/images/vendor_orig.img | grep -qi "EROFS"; then
+            IS_VENDOR_EROFS=1
+            fsck.erofs --extract=/mnt/work/vendor_dir /mnt/work/images/vendor_orig.img
+          else
+            mkdir -p /mnt/work/mounts/vendor_ro
+            sudo mount -o ro,loop /mnt/work/images/vendor_orig.img /mnt/work/mounts/vendor_ro
+            sudo rsync -aAX /mnt/work/mounts/vendor_ro/ /mnt/work/vendor_dir/
+            sudo umount /mnt/work/mounts/vendor_ro
+          fi
+
+          # 1. Inyectar módulos .ko nuevos compilados con kernel 4.19.325 BPF
+          mkdir -p /mnt/work/ko_new
+          tar -xzf /mnt/work/downloads/kernel/rhode-kernel-modules.tar.gz -C /mnt/work/ko_new
+          REPLACED=0
+          while IFS= read -r -d '' existing_ko; do
+            ko_name=$(basename "$existing_ko")
+            if [ -f "/mnt/work/ko_new/$ko_name" ]; then
+              sudo cp -f "/mnt/work/ko_new/$ko_name" "$existing_ko"
+              sudo chmod 0644 "$existing_ko"
+              REPLACED=$((REPLACED + 1))
+            fi
+          done < <(find /mnt/work/vendor_dir/lib/modules -type f -name "*.ko" -print0 2>/dev/null)
+          echo "Módulos .ko reemplazados en vendor: $REPLACED"
+
+          # 2. Compilar precompiled_sepolicy y generar los 3 archivos .sha256 exactos para init
+          mkdir -p /mnt/work/mounts/{sys_ro,sysext_ro,prod_ro}
+          sudo mount -o ro,loop /mnt/work/images/system.img /mnt/work/mounts/sys_ro
+          sudo mount -o ro,loop /mnt/work/images/system_ext.img /mnt/work/mounts/sysext_ro
+          sudo mount -o ro,loop /mnt/work/images/product.img /mnt/work/mounts/prod_ro
+
+          VENDOR_VER=$(cat /mnt/work/vendor_dir/etc/selinux/plat_sepolicy_vers.txt | tr -d '[:space:]')
           echo "Versión SELinux vendor: $VENDOR_VER"
 
-          cp /mnt/work/ext_sys/system/etc/selinux/plat_sepolicy.cil /mnt/work/selinux_build/
-          cp /mnt/work/ext_sys/system/etc/selinux/mapping/${VENDOR_VER}.cil /mnt/work/selinux_build/
-          cp /mnt/work/ext_sys/system/etc/selinux/mapping/${VENDOR_VER}.compat.cil /mnt/work/selinux_build/ 2>/dev/null || true
-          cp /mnt/work/ext_ext/etc/selinux/system_ext_sepolicy.cil /mnt/work/selinux_build/ 2>/dev/null || true
-          cp /mnt/work/ext_ext/etc/selinux/mapping/${VENDOR_VER}.cil /mnt/work/selinux_build/system_ext_mapping.cil 2>/dev/null || true
-          cp /mnt/work/ext_prod/etc/selinux/product_sepolicy.cil /mnt/work/selinux_build/ 2>/dev/null || true
-          cp /mnt/work/ext_prod/etc/selinux/mapping/${VENDOR_VER}.cil /mnt/work/selinux_build/product_mapping.cil 2>/dev/null || true
-          cp /mnt/work/ext_mi/etc/selinux/*.cil /mnt/work/selinux_build/ 2>/dev/null || true
-          cp /mnt/work/ext_ven/etc/selinux/vendor_sepolicy.cil /mnt/work/selinux_build/
-          cp /mnt/work/ext_ven/etc/selinux/plat_pub_versioned.cil /mnt/work/selinux_build/
+          SYS_SE="/mnt/work/mounts/sys_ro/system/etc/selinux"
+          [ ! -d "$SYS_SE" ] && SYS_SE="/mnt/work/mounts/sys_ro/etc/selinux"
 
-          # Calcular los SHA-256 exactos que init verifica al arrancar
-          cat /mnt/work/ext_sys/system/etc/selinux/plat_sepolicy.cil \
-              /mnt/work/ext_sys/system/etc/selinux/mapping/${VENDOR_VER}.cil \
-              /mnt/work/ext_sys/system/etc/selinux/mapping/${VENDOR_VER}.compat.cil 2>/dev/null | sha256sum | awk '{print $1}' > /mnt/work/selinux_build/plat_and_mapping.sha256
+          cp -f "$SYS_SE/plat_sepolicy.cil" /mnt/work/selinux_build/
+          cp -f "$SYS_SE/mapping/${VENDOR_VER}.cil" /mnt/work/selinux_build/
+          cp -f "$SYS_SE/mapping/${VENDOR_VER}.compat.cil" /mnt/work/selinux_build/ 2>/dev/null || true
+          cp -f /mnt/work/mounts/sysext_ro/etc/selinux/system_ext_sepolicy.cil /mnt/work/selinux_build/ 2>/dev/null || true
+          cp -f /mnt/work/mounts/sysext_ro/etc/selinux/mapping/${VENDOR_VER}.cil /mnt/work/selinux_build/system_ext_mapping.cil 2>/dev/null || true
+          cp -f /mnt/work/mounts/prod_ro/etc/selinux/product_sepolicy.cil /mnt/work/selinux_build/ 2>/dev/null || true
+          cp -f /mnt/work/mounts/prod_ro/etc/selinux/mapping/${VENDOR_VER}.cil /mnt/work/selinux_build/product_mapping.cil 2>/dev/null || true
+          sudo cp -f /mnt/work/vendor_dir/etc/selinux/vendor_sepolicy.cil /mnt/work/selinux_build/
+          sudo cp -f /mnt/work/vendor_dir/etc/selinux/plat_pub_versioned.cil /mnt/work/selinux_build/
+          sudo chown -R $USER:$USER /mnt/work/selinux_build
 
-          cat /mnt/work/ext_ext/etc/selinux/system_ext_sepolicy.cil \
-              /mnt/work/ext_ext/etc/selinux/mapping/${VENDOR_VER}.cil 2>/dev/null | sha256sum | awk '{print $1}' > /mnt/work/selinux_build/system_ext_and_mapping.sha256
+          # Calcular hashes SHA-256 antes de filtrar CIL para que coincidan con las particiones montadas
+          cat "$SYS_SE/plat_sepolicy.cil" "$SYS_SE/mapping/${VENDOR_VER}.cil" "$SYS_SE/mapping/${VENDOR_VER}.compat.cil" 2>/dev/null \
+            | sha256sum | awk '{print $1}' > /mnt/work/selinux_build/plat_and_mapping.sha256
 
-          cat /mnt/work/ext_prod/etc/selinux/product_sepolicy.cil \
-              /mnt/work/ext_prod/etc/selinux/mapping/${VENDOR_VER}.cil 2>/dev/null | sha256sum | awk '{print $1}' > /mnt/work/selinux_build/product_and_mapping.sha256
+          cat /mnt/work/mounts/sysext_ro/etc/selinux/system_ext_sepolicy.cil /mnt/work/mounts/sysext_ro/etc/selinux/mapping/${VENDOR_VER}.cil 2>/dev/null \
+            | sha256sum | awk '{print $1}' > /mnt/work/selinux_build/system_ext_and_mapping.sha256
 
-          # Deduplicar declaraciones (typeattribute ...) repetidas en plat_sepolicy.cil
+          cat /mnt/work/mounts/prod_ro/etc/selinux/product_sepolicy.cil /mnt/work/mounts/prod_ro/etc/selinux/mapping/${VENDOR_VER}.cil 2>/dev/null \
+            | sha256sum | awk '{print $1}' > /mnt/work/selinux_build/product_and_mapping.sha256
+
+          sudo umount /mnt/work/mounts/sys_ro /mnt/work/mounts/sysext_ro /mnt/work/mounts/prod_ro
+
+          # Deduplicar declaraciones (type ...) y (typeattribute ...)
           python3 - << 'EOF'
-          seen_attrs = set()
+          import re
+          seen_types, seen_attrs = set(), set()
+          type_re = re.compile(r'^\s*\(type\s+([^\s\)]+)\s*\)\s*$')
+          attr_re = re.compile(r'^\s*\(typeattribute\s+([^\s\)]+)\s*\)\s*$')
           files = [
               "/mnt/work/selinux_build/plat_sepolicy.cil",
               "/mnt/work/selinux_build/202604.cil",
@@ -126,17 +252,19 @@ jobs:
                       lines = f.readlines()
               except FileNotFoundError:
                   continue
-              out_lines = []
+              out = []
               for line in lines:
-                  s = line.strip()
-                  if s.startswith("(typeattribute ") and s.endswith(")"):
-                      if s in seen_attrs:
-                          print(f"Eliminando duplicado en {path}: {s}")
-                          continue
-                      seen_attrs.add(s)
-                  out_lines.append(line)
+                  m1 = type_re.match(line)
+                  if m1:
+                      if m1.group(1) in seen_types: continue
+                      seen_types.add(m1.group(1))
+                  m2 = attr_re.match(line)
+                  if m2:
+                      if m2.group(1) in seen_attrs: continue
+                      seen_attrs.add(m2.group(1))
+                  out.append(line)
               with open(path, "w") as f:
-                  f.writelines(out_lines)
+                  f.writelines(out)
           EOF
 
           CIL_LIST=""
@@ -144,87 +272,90 @@ jobs:
             [ -f "/mnt/work/selinux_build/$f" ] && CIL_LIST="$CIL_LIST /mnt/work/selinux_build/$f"
           done
 
-          echo "=== Compilando precompiled_sepolicy ==="
-          secilc -M true -G -N $CIL_LIST \
+          secilc -m -M true -G -N -c 30 $CIL_LIST \
             -o /mnt/work/selinux_build/precompiled_sepolicy \
             -f /dev/null
 
-          ls -lh /mnt/work/selinux_build/precompiled_sepolicy
-          rm -rf /mnt/work/ext_sys /mnt/work/ext_ext /mnt/work/ext_prod /mnt/work/ext_mi /mnt/work/ext_ven
+          sudo cp -f /mnt/work/selinux_build/precompiled_sepolicy /mnt/work/vendor_dir/etc/selinux/precompiled_sepolicy
+          sudo cp -f /mnt/work/selinux_build/plat_and_mapping.sha256 /mnt/work/vendor_dir/etc/selinux/precompiled_sepolicy.plat_sepolicy_and_mapping.sha256
+          sudo cp -f /mnt/work/selinux_build/system_ext_and_mapping.sha256 /mnt/work/vendor_dir/etc/selinux/precompiled_sepolicy.system_ext_sepolicy_and_mapping.sha256
+          sudo cp -f /mnt/work/selinux_build/product_and_mapping.sha256 /mnt/work/vendor_dir/etc/selinux/precompiled_sepolicy.product_sepolicy_and_mapping.sha256
 
-      - name: 2. Parchear vendor_evox.img (fstab + precompiled_sepolicy + hashes SHA-256)
-        run: |
-          mkdir -p /mnt/work/vendor_dir
-          if file /mnt/work/evox/vendor_evox.img | grep -qi "EROFS"; then
-            fsck.erofs --extract=/mnt/work/vendor_dir /mnt/work/evox/vendor_evox.img
-          else
-            mkdir -p /mnt/work/mnt_ven
-            sudo mount -o loop,ro /mnt/work/evox/vendor_evox.img /mnt/work/mnt_ven
-            sudo cp -aAX /mnt/work/mnt_ven/. /mnt/work/vendor_dir/
-            sudo umount /mnt/work/mnt_ven
-          fi
-
-          # Inyectar precompiled_sepolicy y los nuevos hashes SHA-256
-          sudo cp /mnt/work/selinux_build/precompiled_sepolicy /mnt/work/vendor_dir/etc/selinux/precompiled_sepolicy
-          sudo cp /mnt/work/selinux_build/plat_and_mapping.sha256 /mnt/work/vendor_dir/etc/selinux/precompiled_sepolicy.plat_sepolicy_and_mapping.sha256
-          sudo cp /mnt/work/selinux_build/system_ext_and_mapping.sha256 /mnt/work/vendor_dir/etc/selinux/precompiled_sepolicy.system_ext_sepolicy_and_mapping.sha256
-          sudo cp /mnt/work/selinux_build/product_and_mapping.sha256 /mnt/work/vendor_dir/etc/selinux/precompiled_sepolicy.product_sepolicy_and_mapping.sha256
-
-          # Parchear fstab
+          # 3. Limpiar AVB y cifrado forzado en fstab de vendor
           for FSTAB in /mnt/work/vendor_dir/etc/fstab.*; do
             [ -f "$FSTAB" ] || continue
-            echo "=== Parcheando $FSTAB ==="
-            if ! grep -q "^mi_ext[[:space:]]" "$FSTAB"; then
-              sudo sed -i '/^product[[:space:]]/a mi_ext                                                  /mi_ext              erofs   ro                                                   wait,slotselect,logical,first_stage_mount' "$FSTAB"
-            fi
             sudo sed -i 's/,avb=[^,]*//g; s/,avb//g; s/avb=[^,]*,//g' "$FSTAB"
             sudo sed -i 's/fileencryption=[^,]*,//g; s/,fileencryption=[^,]*//g' "$FSTAB"
           done
 
-          sudo mkfs.erofs -zlz4hc,9 \
-            --file-contexts=/mnt/work/vendor_dir/etc/selinux/vendor_file_contexts \
-            /mnt/work/out/vendor_evox_patched.img \
-            /mnt/work/vendor_dir
-
-      - name: 3. Parchear fstab dentro de vendor_boot_evox.img
-        run: |
-          mkdir -p /mnt/work/vboot_out /mnt/work/ramdisk_dir
-          python3 /mnt/work/mkbootimg/unpack_bootimg.py \
-            --boot_img /mnt/work/evox/vendor_boot_evox.img \
-            --out /mnt/work/vboot_out \
-            --format mkbootimg > /mnt/work/mkbootimg_args.txt
-
-          cd /mnt/work/ramdisk_dir
-          RAMDISK_FILE=$(ls /mnt/work/vboot_out/vendor_ramdisk* | head -n 1)
-          if file "$RAMDISK_FILE" | grep -qi "LZ4"; then
-            lz4 -d "$RAMDISK_FILE" -c | cpio -idmv
+          # 4. Reempaquetar vendor.img en su formato nativo (EROFS o ext4)
+          if [ "$IS_VENDOR_EROFS" -eq 1 ]; then
+            sudo mkfs.erofs -zlz4hc,9 \
+              --file-contexts=/mnt/work/vendor_dir/etc/selinux/vendor_file_contexts \
+              /mnt/work/images/vendor.img \
+              /mnt/work/vendor_dir
           else
-            gzip -dc "$RAMDISK_FILE" | cpio -idmv
+            USED_KB=$(sudo du -sk /mnt/work/vendor_dir | awk '{print $1}')
+            IMG_SIZE_BYTES=$(( ((USED_KB + 131072) * 1024 / 4096) * 4096 ))
+            truncate -s "$IMG_SIZE_BYTES" /mnt/work/images/vendor.img
+            mke2fs -t ext4 -b 4096 -L vendor -O ^has_journal /mnt/work/images/vendor.img
+            sudo e2fsdroid -e -S /mnt/work/vendor_dir/etc/selinux/vendor_file_contexts -a /vendor -f /mnt/work/vendor_dir /mnt/work/images/vendor.img
+            e2fsck -fy /mnt/work/images/vendor.img || true
+            resize2fs -M /mnt/work/images/vendor.img
           fi
 
-          for FSTAB in $(find /mnt/work/ramdisk_dir -name "fstab.*"); do
-            echo "=== Parcheando ramdisk fstab: $FSTAB ==="
-            if ! grep -q "^mi_ext[[:space:]]" "$FSTAB"; then
-              sed -i '/^product[[:space:]]/a mi_ext                                                  /mi_ext              erofs   ro                                                   wait,slotselect,logical,first_stage_mount' "$FSTAB"
-            fi
-            sed -i 's/,avb=[^,]*//g; s/,avb//g; s/avb=[^,]*,//g' "$FSTAB"
-          done
-
-          find . | cpio -o -H newc | lz4 -l -12 --favor-decSpeed > "$RAMDISK_FILE"
-
-          ARGS=$(cat /mnt/work/mkbootimg_args.txt)
-          eval "python3 /mnt/work/mkbootimg/mkbootimg.py $ARGS --vendor_boot /mnt/work/out/vendor_boot_patched.img"
-
-      - name: Comprimir y publicar artefactos en Release Alpha 2
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Empaquetar super_hyperos.img con lpmake (7583301632 bytes exactos de rhode)
         run: |
-          cd /mnt/work/out
-          for img in *.img; do
-            [ -f "$img" ] && zstd -19 -T0 "$img" -o "${img}.zst"
-          done
-          gh release create "${{ github.event.inputs.output_tag }}" \
-            -R "${{ github.repository }}" \
-            --title "HyperOS 4 Rhode Alpha 2 (Option A - Raw EROFS + mi_ext + Precompiled SEPolicy)" \
-            --notes "vendor_evox y vendor_boot parcheados con mi_ext_a y precompiled_sepolicy compilado contra HyperOS 4." \
-            /mnt/work/out/*.zst || gh release upload "${{ github.event.inputs.output_tag }}" -R "${{ github.repository }}" /mnt/work/out/*.zst --clobber
+          cd /mnt/work/images
+
+          SIZE_SYS=$(stat -c%s system.img)
+          SIZE_SYSEXT=$(stat -c%s system_ext.img)
+          SIZE_PROD=$(stat -c%s product.img)
+          SIZE_VEND=$(stat -c%s vendor.img)
+
+          TOTAL_PARTS=$((SIZE_SYS + SIZE_SYSEXT + SIZE_PROD + SIZE_VEND))
+          SUPER_DEVICE_SIZE=7583301632
+          SUPER_GROUP_SIZE=7579107328
+
+          echo "=== Desglose final de particiones ==="
+          echo "system:     $SIZE_SYS bytes ($((SIZE_SYS / 1024 / 1024)) MB)"
+          echo "system_ext: $SIZE_SYSEXT bytes ($((SIZE_SYSEXT / 1024 / 1024)) MB)"
+          echo "product:    $SIZE_PROD bytes ($((SIZE_PROD / 1024 / 1024)) MB)"
+          echo "vendor:     $SIZE_VEND bytes ($((SIZE_VEND / 1024 / 1024)) MB)"
+          echo "TOTAL:      $TOTAL_PARTS bytes / $SUPER_GROUP_SIZE bytes máximos"
+
+          if [ "$TOTAL_PARTS" -gt "$SUPER_GROUP_SIZE" ]; then
+            echo "ERROR: La suma ($TOTAL_PARTS) excede el límite físico de super en rhode ($SUPER_GROUP_SIZE)."
+            exit 1
+          fi
+
+          lpmake \
+            --metadata-size 65536 \
+            --super-name super \
+            --metadata-slots 3 \
+            --device super:${SUPER_DEVICE_SIZE} \
+            --group qti_dynamic_partitions_a:${SUPER_GROUP_SIZE} \
+            --group qti_dynamic_partitions_b:${SUPER_GROUP_SIZE} \
+            --partition system_a:readonly:${SIZE_SYS}:qti_dynamic_partitions_a --image system_a=system.img \
+            --partition system_ext_a:readonly:${SIZE_SYSEXT}:qti_dynamic_partitions_a --image system_ext_a=system_ext.img \
+            --partition product_a:readonly:${SIZE_PROD}:qti_dynamic_partitions_a --image product_a=product.img \
+            --partition vendor_a:readonly:${SIZE_VEND}:qti_dynamic_partitions_a --image vendor_a=vendor.img \
+            --partition system_b:readonly:0:qti_dynamic_partitions_b \
+            --partition system_ext_b:readonly:0:qti_dynamic_partitions_b \
+            --partition product_b:readonly:0:qti_dynamic_partitions_b \
+            --partition vendor_b:readonly:0:qti_dynamic_partitions_b \
+            --sparse \
+            --output /mnt/work/out/super_hyperos.img
+
+          ls -lh /mnt/work/out/super_hyperos.img
+          zstd -T0 -6 /mnt/work/out/super_hyperos.img -o /mnt/work/out/super_hyperos.img.zst
+          rm -f /mnt/work/out/super_hyperos.img
+          ls -lh /mnt/work/out/
+
+      - name: Publicar super_hyperos.img.zst y boot_hyperos_bpf.img en GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: hyperos4-rhode-alpha2
+          name: "HyperOS 4 Port (rhode) - Alpha 2 (super 7583301632 + boot BPF + SELinux SHA256 + módulos .ko)"
+          files: |
+            /mnt/work/out/*
