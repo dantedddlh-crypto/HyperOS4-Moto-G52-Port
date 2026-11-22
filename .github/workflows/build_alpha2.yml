@@ -50,11 +50,16 @@ jobs:
           sudo ldconfig
           test -x /usr/local/bin/secilc && echo "secilc moderno compilado e instalado correctamente"
 
-          # Compilar lpmake nativo x86_64 desde fuente (cero fallos de URL de releases)
+          ## Compilar lpmake nativo x86_64 con g++ desde LonelyFool/lpunpack_and_lpmake
           git clone --depth=1 https://github.com/LonelyFool/lpunpack_and_lpmake.git /mnt/work/lptools_src
-          make -C /mnt/work/lptools_src -j$(nproc)
-          LPMAKE_BIN=$(find /mnt/work/lptools_src -type f -name "lpmake" -executable | head -n 1)
-          test -n "$LPMAKE_BIN" && sudo cp -f "$LPMAKE_BIN" /usr/local/bin/lpmake && sudo chmod +x /usr/local/bin/lpmake
+          LP_SRC=$(find /mnt/work/lptools_src -name "lpmake.cpp" -exec dirname {} \; | head -n 1)
+          LIBLP_SRC=$(find /mnt/work/lptools_src -path "*liblp*" -name "*.cpp" -exec dirname {} \; | sort -u | tr '\n' ' ')
+          LIBLP_INC=$(find /mnt/work/lptools_src -path "*liblp*" -name "*.h" -exec dirname {} \; | sort -u | sed 's/^/-I/')
+          g++ -std=c++17 -O2 -D_FILE_OFFSET_BITS=64 \
+            $LIBLP_INC -I/mnt/work/lptools_src \
+            "$LP_SRC"/*.cpp $LIBLP_SRC/*.cpp \
+            -lsparse -lz -o /usr/local/bin/lpmake
+          sudo chmod +x /usr/local/bin/lpmake
           which lpmake
 
           curl -fL "https://github.com/topjohnwu/Magisk/releases/download/v31.1/Magisk-v31.1.apk" -o /mnt/work/magisk.apk
