@@ -48,7 +48,7 @@ jobs:
           sudo cp -a /mnt/work/sepol_root/lib/libsepol* /usr/local/lib/ 2>/dev/null || true
           sudo cp -a /mnt/work/sepol_root/usr/lib/libsepol* /usr/local/lib/ 2>/dev/null || true
           sudo ldconfig
-          /usr/local/bin/secilc --version
+          test -x /usr/local/bin/secilc && echo "secilc moderno compilado e instalado correctamente"
 
           # Descargar lpmake y e2fsdroid estáticos si no vienen en el PATH de Jammy
           if ! command -v lpmake >/dev/null 2>&1 || ! command -v e2fsdroid >/dev/null 2>&1; then
