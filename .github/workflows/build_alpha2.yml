@@ -37,12 +37,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y android-sdk-libsparse-utils attr build-essential flex bison libpcre2-dev e2fsprogs erofs-utils f2fs-tools p7zip-full python3 rsync selinux-utils zstd unzip wget curl
 
-          # Compilar secilc moderno desde SELinuxProject/selinux (soporta permissionx nlmsg de Android 17 / HyperOS 4)
+          # Compilar libsepol y secilc moderno apuntando a sus propias cabeceras (sin manuales xmlto)
           git clone --depth=1 https://github.com/SELinuxProject/selinux.git /mnt/work/selinux_src
-          make -C /mnt/work/selinux_src/libsepol -j$(nproc)
-          make -C /mnt/work/selinux_src/secilc -j$(nproc)
+          make -C /mnt/work/selinux_src/libsepol install DESTDIR=/mnt/work/sepol_root -j$(nproc)
+          make -C /mnt/work/selinux_src/secilc secilc \
+            CFLAGS="-O2 -I/mnt/work/sepol_root/usr/include" \
+            LDFLAGS="-L/mnt/work/sepol_root/usr/lib -L/mnt/work/sepol_root/lib" \
+            -j$(nproc)
           sudo cp -f /mnt/work/selinux_src/secilc/secilc /usr/local/bin/secilc
-          echo "/mnt/work/selinux_src/libsepol/src" | sudo tee /etc/ld.so.conf.d/libsepol-modern.conf
+          sudo cp -a /mnt/work/sepol_root/lib/libsepol* /usr/local/lib/ 2>/dev/null || true
+          sudo cp -a /mnt/work/sepol_root/usr/lib/libsepol* /usr/local/lib/ 2>/dev/null || true
           sudo ldconfig
           /usr/local/bin/secilc --version
 
