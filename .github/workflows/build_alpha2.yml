@@ -47,7 +47,7 @@ jobs:
             fi
           fi
 
-          curl -fL "https://github.com/topjohnwu/Magisk/releases/download/v28.1/Magisk-v28.1.apk" -o /mnt/work/magisk.apk
+          curl -fL "https://github.com/topjohnwu/Magisk/releases/download/v31.1/Magisk-v31.1.apk" -o /mnt/work/magisk.apk
           unzip -p /mnt/work/magisk.apk lib/x86_64/libmagiskboot.so > /mnt/work/magiskboot
           chmod +x /mnt/work/magiskboot
           rm -f /mnt/work/magisk.apk
@@ -100,34 +100,25 @@ jobs:
             fi
           done
 
-          if file /mnt/work/images/vendor_orig.img | grep -qi "EROFS"; then
-            echo "vendor_orig.img: EROFS"
-          elif file /mnt/work/images/vendor_orig.img | grep -qi "ext4 filesystem"; then
-            echo "vendor_orig.img: ext4"
-          else
-            echo "ERROR: vendor_evox.img.zst no contiene un filesystem vendor EROFS/ext4."
-            file /mnt/work/images/vendor_orig.img
-            exit 1
-          fi
+          ls -lh /mnt/work/images/
 
       - name: Debloat, fusión de mi_ext en product, ajustes DPI 400 / 90Hz y compactación
         run: |
           mkdir -p /mnt/work/mounts/{prod_rw,sys_rw,sysext_ro,miext_ro}
 
-          # Si el donante viene en EROFS, convertir product y system a ext4 editable o extraerlos
+          # Convertir system, system_ext y product a ext4 editable si vienen en EROFS
           for part in system system_ext product; do
-            if file /mnt/work/images/${part}.img | grep -qi "EROFS"; then
+            rm -rf /mnt/work/erofs_${part} && mkdir -p /mnt/work/erofs_${part}
+            if fsck.erofs --extract=/mnt/work/erofs_${part} /mnt/work/images/${part}.img 2>/dev/null && [ "$(ls -A /mnt/work/erofs_${part})" ]; then
               echo "Extrayendo $part desde EROFS a ext4..."
-              mkdir -p /mnt/work/erofs_${part}
-              fsck.erofs --extract=/mnt/work/erofs_${part} /mnt/work/images/${part}.img
               USED_KB=$(du -sk /mnt/work/erofs_${part} | awk '{print $1}')
               SIZE_B=$(( ((USED_KB + 1048576) * 1024 / 4096) * 4096 ))
               rm -f /mnt/work/images/${part}.img
               truncate -s "$SIZE_B" /mnt/work/images/${part}.img
               mke2fs -t ext4 -b 4096 -L "$part" -O ^has_journal /mnt/work/images/${part}.img
               sudo e2fsdroid -e -a "/$part" -f /mnt/work/erofs_${part} /mnt/work/images/${part}.img
-              rm -rf /mnt/work/erofs_${part}
             fi
+            rm -rf /mnt/work/erofs_${part}
           done
 
           truncate -s +1200M /mnt/work/images/product.img
@@ -157,8 +148,8 @@ jobs:
             /mnt/work/mounts/prod_rw/data-app/*
 
           if [ -f /mnt/work/images/mi_ext.img ]; then
-            if file /mnt/work/images/mi_ext.img | grep -qi "EROFS"; then
-              fsck.erofs --extract=/mnt/work/mounts/miext_ro /mnt/work/images/mi_ext.img
+            rm -rf /mnt/work/mounts/miext_ro && mkdir -p /mnt/work/mounts/miext_ro
+            if fsck.erofs --extract=/mnt/work/mounts/miext_ro /mnt/work/images/mi_ext.img 2>/dev/null && [ "$(ls -A /mnt/work/mounts/miext_ro)" ]; then
               sudo cp -rn /mnt/work/mounts/miext_ro/* /mnt/work/mounts/prod_rw/ 2>/dev/null || true
               rm -rf /mnt/work/mounts/miext_ro
             else
@@ -192,14 +183,16 @@ jobs:
       - name: Extraer vendor_evox, inyectar módulos .ko, compilar SELinux + SHA-256 y reempaquetar vendor
         run: |
           IS_VENDOR_EROFS=0
-          if file /mnt/work/images/vendor_orig.img | grep -qi "EROFS"; then
+          rm -rf /mnt/work/vendor_dir && mkdir -p /mnt/work/vendor_dir
+          if fsck.erofs --extract=/mnt/work/vendor_dir /mnt/work/images/vendor_orig.img 2>/dev/null && [ -d /mnt/work/vendor_dir/etc ]; then
             IS_VENDOR_EROFS=1
-            fsck.erofs --extract=/mnt/work/vendor_dir /mnt/work/images/vendor_orig.img
+            echo "vendor_orig.img extraído correctamente como EROFS"
           else
-            mkdir -p /mnt/work/mounts/vendor_ro
+            rm -rf /mnt/work/vendor_dir && mkdir -p /mnt/work/vendor_dir /mnt/work/mounts/vendor_ro
             sudo mount -o ro,loop /mnt/work/images/vendor_orig.img /mnt/work/mounts/vendor_ro
             sudo rsync -aAX /mnt/work/mounts/vendor_ro/ /mnt/work/vendor_dir/
             sudo umount /mnt/work/mounts/vendor_ro
+            echo "vendor_orig.img extraído correctamente como ext4"
           fi
 
           # 1. Inyectar módulos .ko nuevos compilados con kernel 4.19.325 BPF
