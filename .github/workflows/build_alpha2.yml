@@ -50,11 +50,15 @@ jobs:
           sudo ldconfig
           test -x /usr/local/bin/secilc && echo "secilc moderno compilado e instalado correctamente"
 
-          # Compilar lpmake nativo x86_64 desde fuente (cero fallos de URL de releases)
+          # Obtener binario lpmake precompilado o instalar vía apt
           git clone --depth=1 https://github.com/LonelyFool/lpunpack_and_lpmake.git /mnt/work/lptools_src
-          make -C /mnt/work/lptools_src -j$(nproc)
-          sudo cp -f /mnt/work/lptools_src/bin/lpmake /usr/local/bin/lpmake
-          sudo chmod +x /usr/local/bin/lpmake
+          LPMAKE_BIN=$(find /mnt/work/lptools_src -type f -name "lpmake" | head -n 1)
+          if [ -n "$LPMAKE_BIN" ]; then
+            sudo cp -f "$LPMAKE_BIN" /usr/local/bin/lpmake
+            sudo chmod +x /usr/local/bin/lpmake
+          else
+            sudo apt-get install -y android-sdk-platform-tools-common || true
+          fi
           which lpmake
 
           curl -fL "https://github.com/topjohnwu/Magisk/releases/download/v31.1/Magisk-v31.1.apk" -o /mnt/work/magisk.apk
