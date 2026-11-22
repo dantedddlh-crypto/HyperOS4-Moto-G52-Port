@@ -60,8 +60,9 @@ jobs:
           gh release download "${{ github.event.inputs.evox_tag }}" --repo "${{ github.repository }}" --dir /mnt/work/downloads/evox
           gh release download "${{ github.event.inputs.kernel_tag }}" --repo "${{ github.repository }}" --dir /mnt/work/downloads/kernel
 
+          BOOT_ZST="/mnt/work/downloads/evox/boot_evox.img.zst"
+          test -f "$BOOT_ZST" || { echo "ERROR: falta el asset exacto boot_evox.img.zst"; exit 1; }
           cd /mnt/work/boot_repack
-          BOOT_ZST=$(ls /mnt/work/downloads/evox/*boot*.img.zst | head -n 1)
           zstd -d "$BOOT_ZST" -o boot_orig.img
           /mnt/work/magiskboot unpack boot_orig.img
           cp -f /mnt/work/downloads/kernel/Image.gz-dtb kernel
@@ -87,7 +88,8 @@ jobs:
             zstd -d /mnt/work/downloads/donor/mi_ext.img.zst -o mi_ext.img
           fi
 
-          VENDOR_ZST=$(ls /mnt/work/downloads/evox/*vendor*.img.zst | head -n 1)
+          VENDOR_ZST="/mnt/work/downloads/evox/vendor_evox.img.zst"
+          test -f "$VENDOR_ZST" || { echo "ERROR: falta el asset exacto vendor_evox.img.zst"; exit 1; }
           zstd -d "$VENDOR_ZST" -o vendor_orig.img
 
           for img in system system_ext product vendor_orig mi_ext; do
@@ -97,6 +99,16 @@ jobs:
               mv "${img}_raw.img" "${img}.img"
             fi
           done
+
+          if file /mnt/work/images/vendor_orig.img | grep -qi "EROFS"; then
+            echo "vendor_orig.img: EROFS"
+          elif file /mnt/work/images/vendor_orig.img | grep -qi "ext4 filesystem"; then
+            echo "vendor_orig.img: ext4"
+          else
+            echo "ERROR: vendor_evox.img.zst no contiene un filesystem vendor EROFS/ext4."
+            file /mnt/work/images/vendor_orig.img
+            exit 1
+          fi
 
       - name: Debloat, fusión de mi_ext en product, ajustes DPI 400 / 90Hz y compactación
         run: |
