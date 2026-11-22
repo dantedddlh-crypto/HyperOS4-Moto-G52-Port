@@ -315,18 +315,23 @@ jobs:
             sudo sed -i 's/fileencryption=[^,]*,//g; s/,fileencryption=[^,]*//g' "$FSTAB"
           done
 
-          # 4. Reempaquetar vendor.img en su formato nativo (EROFS o ext4)
+          # 4. Reempaquetar vendor.img en su formato nativo (EROFS o ext4 con rsync -aAX)
           if [ "$IS_VENDOR_EROFS" -eq 1 ]; then
             sudo mkfs.erofs -zlz4hc,9 \
               --file-contexts=/mnt/work/vendor_dir/etc/selinux/vendor_file_contexts \
               /mnt/work/images/vendor.img \
               /mnt/work/vendor_dir
           else
-            USED_KB=$(sudo du -sk /mnt/work/vendor_dir | awk '{print $1}')
-            IMG_SIZE_BYTES=$(( ((USED_KB + 131072) * 1024 / 4096) * 4096 ))
-            truncate -s "$IMG_SIZE_BYTES" /mnt/work/images/vendor.img
-            mke2fs -t ext4 -b 4096 -L vendor -O ^has_journal /mnt/work/images/vendor.img
-            sudo e2fsdroid -e -S /mnt/work/vendor_dir/etc/selinux/vendor_file_contexts -a /vendor -f /mnt/work/vendor_dir /mnt/work/images/vendor.img
+            cp -f /mnt/work/images/vendor_orig.img /mnt/work/images/vendor.img
+            truncate -s +128M /mnt/work/images/vendor.img
+            e2fsck -fy /mnt/work/images/vendor.img || true
+            resize2fs /mnt/work/images/vendor.img
+
+            mkdir -p /mnt/work/mounts/vendor_rw
+            sudo mount -o rw,loop /mnt/work/images/vendor.img /mnt/work/mounts/vendor_rw
+            sudo rsync -aAX --delete /mnt/work/vendor_dir/ /mnt/work/mounts/vendor_rw/
+            sudo umount /mnt/work/mounts/vendor_rw
+
             e2fsck -fy /mnt/work/images/vendor.img || true
             resize2fs -M /mnt/work/images/vendor.img
           fi
