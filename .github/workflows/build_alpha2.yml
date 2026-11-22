@@ -29,13 +29,22 @@ jobs:
       - name: Checkout repositorio
         uses: actions/checkout@v4
 
-      - name: Liberar espacio en runner e instalar herramientas Android / EROFS / SELinux
+      - name: Liberar espacio en runner e instalar herramientas Android / EROFS / SELinux moderno
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/android
           sudo mkdir -p /mnt/work/{downloads,images,mounts,vendor_dir,selinux_build,boot_repack,out,bin}
           sudo chown -R $USER:$USER /mnt/work
           sudo apt-get update
-          sudo apt-get install -y android-sdk-libsparse-utils attr e2fsprogs erofs-utils f2fs-tools p7zip-full python3 rsync selinux-utils secilc zstd unzip wget curl
+          sudo apt-get install -y android-sdk-libsparse-utils attr build-essential flex bison libpcre2-dev e2fsprogs erofs-utils f2fs-tools p7zip-full python3 rsync selinux-utils zstd unzip wget curl
+
+          # Compilar secilc moderno desde SELinuxProject/selinux (soporta permissionx nlmsg de Android 17 / HyperOS 4)
+          git clone --depth=1 https://github.com/SELinuxProject/selinux.git /mnt/work/selinux_src
+          make -C /mnt/work/selinux_src/libsepol -j$(nproc)
+          make -C /mnt/work/selinux_src/secilc -j$(nproc)
+          sudo cp -f /mnt/work/selinux_src/secilc/secilc /usr/local/bin/secilc
+          echo "/mnt/work/selinux_src/libsepol/src" | sudo tee /etc/ld.so.conf.d/libsepol-modern.conf
+          sudo ldconfig
+          /usr/local/bin/secilc --version
 
           # Descargar lpmake y e2fsdroid estáticos si no vienen en el PATH de Jammy
           if ! command -v lpmake >/dev/null 2>&1 || ! command -v e2fsdroid >/dev/null 2>&1; then
@@ -106,7 +115,6 @@ jobs:
         run: |
           mkdir -p /mnt/work/mounts/{prod_rw,sys_rw,sysext_ro,miext_ro}
 
-          # Convertir system, system_ext y product a ext4 editable si vienen en EROFS
           for part in system system_ext product; do
             rm -rf /mnt/work/erofs_${part} && mkdir -p /mnt/work/erofs_${part}
             if fsck.erofs --extract=/mnt/work/erofs_${part} /mnt/work/images/${part}.img 2>/dev/null && [ "$(ls -A /mnt/work/erofs_${part})" ]; then
@@ -287,7 +295,7 @@ jobs:
             [ -f "/mnt/work/selinux_build/$f" ] && CIL_LIST="$CIL_LIST /mnt/work/selinux_build/$f"
           done
 
-          secilc -m -M true -G -N -c 30 $CIL_LIST \
+          /usr/local/bin/secilc -m -M true -G -N -c 30 $CIL_LIST \
             -o /mnt/work/selinux_build/precompiled_sepolicy \
             -f /dev/null
 
