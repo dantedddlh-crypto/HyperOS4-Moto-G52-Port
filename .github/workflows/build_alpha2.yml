@@ -366,8 +366,10 @@ jobs:
             --output /mnt/work/out/super_hyperos.img
 
           ls -lh /mnt/work/out/super_hyperos.img
-          zstd -T0 -6 /mnt/work/out/super_hyperos.img -o /mnt/work/out/super_hyperos.img.zst
+          zstd -T0 -10 /mnt/work/out/super_hyperos.img -o /mnt/work/out/super_hyperos.img.zst
           rm -f /mnt/work/out/super_hyperos.img
+          split -b 1900M -d /mnt/work/out/super_hyperos.img.zst /mnt/work/out/super_hyperos.img.zst.part_
+          rm -f /mnt/work/out/super_hyperos.img.zst
           ls -lh /mnt/work/out/
 
       - name: Publicar super_hyperos.img.zst y boot_hyperos_bpf.img en GitHub Release
