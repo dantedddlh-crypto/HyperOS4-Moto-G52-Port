@@ -50,16 +50,16 @@ jobs:
           sudo ldconfig
           test -x /usr/local/bin/secilc && echo "secilc moderno compilado e instalado correctamente"
 
-          # Obtener binario lpmake precompilado o instalar vía apt
-          git clone --depth=1 https://github.com/LonelyFool/lpunpack_and_lpmake.git /mnt/work/lptools_src
-          LPMAKE_BIN=$(find /mnt/work/lptools_src -type f -name "lpmake" | head -n 1)
-          if [ -n "$LPMAKE_BIN" ]; then
-            sudo cp -f "$LPMAKE_BIN" /usr/local/bin/lpmake
-            sudo chmod +x /usr/local/bin/lpmake
-          else
-            sudo apt-get install -y android-sdk-platform-tools-common || true
+          # Descargar binario estático lpmake x86_64 funcional en /usr/local/bin/lpmake
+          curl -fL "https://github.com/LonelyFool/lpunpack_and_lpmake/releases/download/v1.0.2/lpunpack_and_lpmake_x86_64.tar.gz" -o /mnt/work/lptools.tar.gz || \
+          curl -fL "https://github.com/affggh/lptools/releases/download/v1.0/lpmake_linux_x86_64" -o /usr/local/bin/lpmake
+          if [ -s /mnt/work/lptools.tar.gz ]; then
+            tar -xzf /mnt/work/lptools.tar.gz -C /mnt/work/bin
+            LPMAKE_FOUND=$(find /mnt/work/bin -type f -name "lpmake" | head -n 1)
+            sudo cp -f "$LPMAKE_FOUND" /usr/local/bin/lpmake
           fi
-          which lpmake
+          sudo chmod +x /usr/local/bin/lpmake
+          /usr/local/bin/lpmake --help | head -n 3
 
           curl -fL "https://github.com/topjohnwu/Magisk/releases/download/v31.1/Magisk-v31.1.apk" -o /mnt/work/magisk.apk
           unzip -p /mnt/work/magisk.apk lib/x86_64/libmagiskboot.so > /mnt/work/magiskboot
