@@ -147,11 +147,16 @@ jobs:
           echo "kernel.release: $KERNEL_RELEASE"
           echo "vermagic ($MODINFO_KO): $VERMAGIC"
 
-          mkdir -p /mnt/work/mod_out /mnt/work/mod_flat /mnt/work/out_release
+          mkdir -p /mnt/work/mod_out /mnt/work/out_release
           make O=out ARCH=arm64 LLVM=1 INSTALL_MOD_PATH=/mnt/work/mod_out INSTALL_MOD_STRIP=1 modules_install
-          find /mnt/work/mod_out -name "*.ko" -exec cp -f {} /mnt/work/mod_flat/ \;
-          ls -lh /mnt/work/mod_flat/
-          tar -czf /mnt/work/out_release/rhode-kernel-modules.tar.gz -C /mnt/work/mod_flat .
+          MODULES_DIR="/mnt/work/mod_out/lib/modules/$KERNEL_RELEASE"
+          test -d "$MODULES_DIR" || { echo "::error::No existe el directorio instalado de módulos: $MODULES_DIR"; exit 1; }
+          depmod -b /mnt/work/mod_out "$KERNEL_RELEASE"
+          for metadata in modules.dep modules.alias modules.softdep; do
+            test -f "$MODULES_DIR/$metadata" || { echo "::error::depmod no generó $metadata"; exit 1; }
+          done
+          find "$MODULES_DIR" -type f -name "*.ko" -print
+          tar -czf /mnt/work/out_release/rhode-kernel-modules.tar.gz -C "$MODULES_DIR" .
 
           ls -lh out/arch/arm64/boot/Image.gz-dtb
 
@@ -174,11 +179,46 @@ jobs:
             cp -f "$IMG_FILE" boot_orig.img
           fi
 
-          if [ -f boot_orig.img ]; then
-            /mnt/work/tools/magiskboot unpack boot_orig.img
-            cp -f /mnt/work/kernel/out/arch/arm64/boot/Image.gz-dtb kernel
-            /mnt/work/tools/magiskboot repack boot_orig.img /mnt/work/out_release/boot_hyperos_bpf.img
-          fi
+          test -f boot_orig.img || { echo "::error::No se encontró la imagen boot original"; exit 1; }
+          /mnt/work/tools/magiskboot unpack -h boot_orig.img
+          python3 - <<'PY'
+          from pathlib import Path
+
+          header = Path("header")
+          lines = header.read_text().splitlines()
+          for index, line in enumerate(lines):
+              if line.startswith("cmdline="):
+                  tokens = line.partition("=")[2].split()
+                  tokens = [token for token in tokens if not token.startswith("androidboot.selinux=")]
+                  tokens.append("androidboot.selinux=permissive")
+                  lines[index] = "cmdline=" + " ".join(tokens)
+                  break
+          else:
+              raise SystemExit("::error::magiskboot no incluyó cmdline en el header")
+
+          header.write_text("\n".join(lines) + "\n")
+          PY
+          cp -f /mnt/work/kernel/out/arch/arm64/boot/Image.gz-dtb kernel
+          /mnt/work/tools/magiskboot repack boot_orig.img /mnt/work/out_release/boot_hyperos_bpf.img
+
+          mkdir -p /mnt/work/boot_verify
+          cd /mnt/work/boot_verify
+          /mnt/work/tools/magiskboot unpack -h /mnt/work/out_release/boot_hyperos_bpf.img
+          python3 - <<'PY'
+          from pathlib import Path
+
+          lines = Path("header").read_text().splitlines()
+          cmdlines = [line.partition("=")[2] for line in lines if line.startswith("cmdline=")]
+          if len(cmdlines) != 1:
+              raise SystemExit(f"::error::Se esperaba un cmdline en el boot reempaquetado; encontrados: {len(cmdlines)}")
+
+          tokens = cmdlines[0].split()
+          expected = "androidboot.selinux=permissive"
+          if tokens.count(expected) != 1 or "androidboot.selinux=enforcing" in tokens:
+              raise SystemExit(f"::error::cmdline SELinux inválido tras repack: {cmdlines[0]}")
+
+          print(f"cmdline final de boot_hyperos_bpf.img: {cmdlines[0]}")
+          PY
 
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git /mnt/work/AnyKernel3
           cd /mnt/work/AnyKernel3
@@ -195,10 +235,45 @@ jobs:
           cp -f /mnt/work/kernel/out/arch/arm64/boot/Image.gz-dtb /mnt/work/out_release/Image.gz-dtb
           ls -lh /mnt/work/out_release/
 
+      - name: Auditar paquete rhode-kernel-modules.tar.gz
+        run: |
+          set -euo pipefail
+          ARCHIVE=/mnt/work/out_release/rhode-kernel-modules.tar.gz
+          test -s "$ARCHIVE" || { echo "::error::No existe el paquete de módulos"; exit 1; }
+          for artifact in \
+            /mnt/work/out_release/AnyKernel3-rhode-4.19.325-bpf-spoof.zip \
+            /mnt/work/out_release/Image.gz-dtb \
+            /mnt/work/out_release/boot_hyperos_bpf.img; do
+            test -s "$artifact" || { echo "::error::Falta el artefacto de Release: $artifact"; exit 1; }
+          done
+
+          tar -tzf "$ARCHIVE" | sort > /mnt/work/module_archive_contents.txt
+          echo "=== Módulos .ko incluidos ==="
+          grep -E '\.ko$' /mnt/work/module_archive_contents.txt | tee /mnt/work/module_archive_ko.txt
+          test -s /mnt/work/module_archive_ko.txt || { echo "::error::El paquete no contiene módulos .ko"; exit 1; }
+
+          require_entry() {
+            if ! grep -Eq "$1" /mnt/work/module_archive_contents.txt; then
+              echo "::error::Falta en el paquete: $2"
+              exit 1
+            fi
+            echo "OK: $2"
+          }
+
+          require_entry '(^|/)(goodix|synaptics)[^/]*\.ko$' 'driver táctil Goodix o Synaptics'
+          require_entry '(^|/)wlan\.ko$' 'wlan.ko'
+          require_entry '(^|/)focal_fps_mmi\.ko$' 'focal_fps_mmi.ko'
+          require_entry '(^|/)modules\.dep$' 'modules.dep'
+          require_entry '(^|/)modules\.alias$' 'modules.alias'
+          require_entry '(^|/)modules\.softdep$' 'modules.softdep'
+
       - name: Publicar kernel, módulos .ko y boot_hyperos_bpf.img en GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: kernel-rhode-bpf-spoof
           name: "Kernel 4.19.325 (rhode) - BPF Uname Spoof + Módulos .ko"
           files: |
-            /mnt/work/out_release/*
+            /mnt/work/out_release/AnyKernel3-rhode-4.19.325-bpf-spoof.zip
+            /mnt/work/out_release/Image.gz-dtb
+            /mnt/work/out_release/rhode-kernel-modules.tar.gz
+            /mnt/work/out_release/boot_hyperos_bpf.img

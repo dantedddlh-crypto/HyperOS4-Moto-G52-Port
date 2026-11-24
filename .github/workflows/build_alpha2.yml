@@ -214,8 +214,9 @@ jobs:
           REPLACED=0
           while IFS= read -r -d '' existing_ko; do
             ko_name=$(basename "$existing_ko")
-            if [ -f "/mnt/work/ko_new/$ko_name" ]; then
-              sudo cp -f "/mnt/work/ko_new/$ko_name" "$existing_ko"
+            new_ko=$(find /mnt/work/ko_new -type f -name "$ko_name" -print -quit)
+            if [ -n "$new_ko" ]; then
+              sudo cp -f "$new_ko" "$existing_ko"
               sudo chmod 0644 "$existing_ko"
               REPLACED=$((REPLACED + 1))
             fi
