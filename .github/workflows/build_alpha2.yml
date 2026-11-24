@@ -106,6 +106,10 @@ jobs:
           test -f "$VENDOR_ZST" || { echo "ERROR: falta el asset exacto vendor_evox.img.zst"; exit 1; }
           zstd -d "$VENDOR_ZST" -o vendor_orig.img
 
+          VENDOR_BOOT_ZST="/mnt/work/downloads/evox/vendor_boot_evox.img.zst"
+          test -f "$VENDOR_BOOT_ZST" || { echo "ERROR: falta el asset exacto vendor_boot_evox.img.zst"; exit 1; }
+          zstd -d "$VENDOR_BOOT_ZST" -o vendor_boot.img
+
           for img in system system_ext product vendor_orig mi_ext; do
             [ -f "${img}.img" ] || continue
             if file "${img}.img" | grep -q "Android sparse image"; then
@@ -322,6 +326,75 @@ jobs:
             --file-contexts=/mnt/work/vendor_dir/etc/selinux/vendor_file_contexts \
             /mnt/work/images/vendor.img \
             /mnt/work/vendor_dir
+
+      - name: Inyectar módulos en vendor_boot y reempaquetar
+        run: |
+          set -euo pipefail
+          WORK_DIR=/mnt/work/vendor_boot_repack
+          RAMDISK_ROOT="$WORK_DIR/ramdisk_root"
+          VERIFY_DIR="$WORK_DIR/verify"
+          mkdir -p "$RAMDISK_ROOT" "$VERIFY_DIR" /mnt/work/out
+          cp -f /mnt/work/images/vendor_boot.img "$WORK_DIR/vendor_boot.img"
+          cd "$WORK_DIR"
+
+          set +e
+          /mnt/work/magiskboot unpack vendor_boot.img
+          unpack_status=$?
+          set -e
+          if [ "$unpack_status" -ne 0 ] && [ "$unpack_status" -ne 3 ]; then
+            echo "::error::magiskboot no pudo desempacar vendor_boot.img (código $unpack_status)"
+            exit 1
+          fi
+          test -f ramdisk.cpio || { echo "::error::magiskboot no generó ramdisk.cpio"; exit 1; }
+          echo "magiskboot descomprime el ramdisk al desempacar y conserva su formato al reempaquetarlo."
+
+          (cd "$RAMDISK_ROOT" && /mnt/work/magiskboot cpio "$WORK_DIR/ramdisk.cpio" extract)
+          MODULES_ROOT="$RAMDISK_ROOT/lib/modules"
+          test -d "$MODULES_ROOT" || { echo "::error::vendor_boot no contiene /lib/modules en el ramdisk"; exit 1; }
+          mapfile -d '' RAMDISK_KOS < <(find "$MODULES_ROOT" -type f -name "*.ko" -print0)
+          [ "${#RAMDISK_KOS[@]}" -gt 0 ] || { echo "::error::No hay módulos .ko en /lib/modules del ramdisk"; exit 1; }
+
+          REPLACED=0
+          for ramdisk_ko in "${RAMDISK_KOS[@]}"; do
+            ko_name=$(basename "$ramdisk_ko")
+            new_ko=$(find /mnt/work/ko_new -type f -name "$ko_name" -print -quit)
+            if [ -z "$new_ko" ]; then
+              echo "::warning::No hay versión compilada de $ko_name; se conserva el módulo del vendor_boot"
+              continue
+            fi
+            ramdisk_entry=${ramdisk_ko#"$RAMDISK_ROOT"/}
+            /mnt/work/magiskboot cpio "$WORK_DIR/ramdisk.cpio" "add 0644 $ramdisk_entry $new_ko"
+            REPLACED=$((REPLACED + 1))
+            echo "Módulo actualizado en vendor_boot: $ramdisk_entry"
+          done
+          [ "$REPLACED" -gt 0 ] || { echo "::error::Ningún módulo de vendor_boot coincidió con /mnt/work/ko_new"; exit 1; }
+
+          /mnt/work/magiskboot repack vendor_boot.img /mnt/work/out/vendor_boot_hyperos.img
+          test -s /mnt/work/out/vendor_boot_hyperos.img || { echo "::error::No se generó vendor_boot_hyperos.img"; exit 1; }
+
+          mkdir -p "$VERIFY_DIR/ramdisk_root"
+          cd "$VERIFY_DIR"
+          set +e
+          /mnt/work/magiskboot unpack /mnt/work/out/vendor_boot_hyperos.img
+          verify_status=$?
+          set -e
+          if [ "$verify_status" -ne 0 ] && [ "$verify_status" -ne 3 ]; then
+            echo "::error::No se pudo verificar vendor_boot_hyperos.img (código $verify_status)"
+            exit 1
+          fi
+          test -f ramdisk.cpio || { echo "::error::El vendor_boot reempaquetado no contiene ramdisk.cpio"; exit 1; }
+          (cd ramdisk_root && /mnt/work/magiskboot cpio ../ramdisk.cpio extract)
+          for ramdisk_ko in "${RAMDISK_KOS[@]}"; do
+            ko_name=$(basename "$ramdisk_ko")
+            new_ko=$(find /mnt/work/ko_new -type f -name "$ko_name" -print -quit)
+            [ -n "$new_ko" ] || continue
+            ramdisk_entry=${ramdisk_ko#"$RAMDISK_ROOT"/}
+            cmp -s "$new_ko" "$VERIFY_DIR/ramdisk_root/$ramdisk_entry" || {
+              echo "::error::El módulo no quedó actualizado en el vendor_boot final: $ramdisk_entry"
+              exit 1
+            }
+          done
+          ls -lh /mnt/work/out/vendor_boot_hyperos.img
 
       - name: Empaquetar super_hyperos.img con lpmake (7583301632 bytes exactos de rhode)
         run: |
