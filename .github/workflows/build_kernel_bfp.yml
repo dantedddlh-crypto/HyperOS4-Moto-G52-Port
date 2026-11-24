@@ -24,7 +24,7 @@ jobs:
           sudo mkdir -p /mnt/work/tools /mnt/work/toolchain /mnt/work/kernel
           sudo chown -R $USER:$USER /mnt/work
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential ccache curl flex git libncurses5-dev libssl-dev libelf-dev libxml2 libxml2-dev python3 python-is-python3 wget xz-utils zip zstd cpio p7zip-full
+          sudo apt-get install -y bc bison build-essential ccache curl flex git kmod libncurses5-dev libssl-dev libelf-dev libxml2 libxml2-dev python3 python-is-python3 wget xz-utils zip zstd cpio p7zip-full
 
           curl -fL "https://github.com/topjohnwu/Magisk/releases/download/v28.1/Magisk-v28.1.apk" -o /mnt/work/magisk.apk
           unzip -p /mnt/work/magisk.apk lib/x86_64/libmagiskboot.so > /mnt/work/tools/magiskboot
@@ -90,6 +90,19 @@ jobs:
           BASE_DEFCONFIG="vendor/bengal-perf_defconfig"
           [ ! -f "arch/arm64/configs/$BASE_DEFCONFIG" ] && BASE_DEFCONFIG="vendor/sm6225-perf_defconfig"
 
+          mkdir -p arch/arm64/configs/vendor
+          cat > arch/arm64/configs/vendor/hyperos_port.config <<'EOF'
+          CONFIG_EXT4_FS=y
+          CONFIG_EXT4_FS_SECURITY=y
+          CONFIG_EROFS_FS=y
+          CONFIG_EROFS_FS_ZIP=y
+          CONFIG_BPF_SYSCALL=y
+          CONFIG_CGROUP_BPF=y
+          CONFIG_BPF_JIT=y
+          CONFIG_IKCONFIG=y
+          CONFIG_IKCONFIG_PROC=y
+          EOF
+
           FRAGMENTS=""
           for frag in \
             "arch/arm64/configs/vendor/ext_config/moto-bengal.config" \
@@ -97,11 +110,19 @@ jobs:
             "arch/arm64/configs/vendor/rhode.config"; do
             [ -f "$frag" ] && FRAGMENTS="$FRAGMENTS $frag"
           done
+          FRAGMENTS="$FRAGMENTS arch/arm64/configs/vendor/hyperos_port.config"
 
           make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 $BASE_DEFCONFIG
           if [ -n "$FRAGMENTS" ]; then
             ARCH=arm64 scripts/kconfig/merge_config.sh -m -O out out/.config $FRAGMENTS
             make O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 olddefconfig
+            grep -E "CONFIG_(EXT4_FS|EXT4_FS_SECURITY|EROFS_FS|BPF_SYSCALL|CGROUP_BPF)=" out/.config || true
+            for config in EXT4_FS EXT4_FS_SECURITY EROFS_FS EROFS_FS_ZIP BPF_SYSCALL CGROUP_BPF BPF_JIT IKCONFIG IKCONFIG_PROC; do
+              value=$(sed -n "s/^CONFIG_${config}=//p" out/.config)
+              [ -n "$value" ] || value="n"
+              echo "CONFIG_${config}=${value}"
+              [ "$value" = "y" ] || { echo "::error::CONFIG_${config} no quedó habilitado tras olddefconfig"; exit 1; }
+            done
           fi
 
           make -j$(nproc --all) O=out \
@@ -118,6 +139,13 @@ jobs:
             CROSS_COMPILE=aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
             Image.gz-dtb dtbs modules
+
+          KERNEL_RELEASE=$(cat out/include/config/kernel.release)
+          MODINFO_KO=$(find out -type f -name "*.ko" -print -quit)
+          [ -n "$MODINFO_KO" ] || { echo "::error::No se encontraron módulos .ko compilados"; exit 1; }
+          VERMAGIC=$(modinfo -F vermagic "$MODINFO_KO")
+          echo "kernel.release: $KERNEL_RELEASE"
+          echo "vermagic ($MODINFO_KO): $VERMAGIC"
 
           mkdir -p /mnt/work/mod_out /mnt/work/mod_flat /mnt/work/out_release
           make O=out ARCH=arm64 LLVM=1 INSTALL_MOD_PATH=/mnt/work/mod_out INSTALL_MOD_STRIP=1 modules_install
