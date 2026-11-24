@@ -167,8 +167,8 @@ jobs:
           mkdir -p /mnt/work/boot_repack
           cd /mnt/work/boot_repack
 
-          gh release download evox-extracted --pattern "*boot_evox*" --dir /mnt/work/boot_repack || \
-          gh release download evox-extracted --pattern "*boot*" --dir /mnt/work/boot_repack || true
+          gh release download evox-extracted --repo "${{ github.repository }}" --pattern "*boot_evox*" --dir /mnt/work/boot_repack || \
+          gh release download evox-extracted --repo "${{ github.repository }}" --pattern "*boot*" --dir /mnt/work/boot_repack || true
           ls -lh /mnt/work/boot_repack
 
           if ls /mnt/work/boot_repack/*boot*.img.zst >/dev/null 2>&1; then
@@ -179,7 +179,7 @@ jobs:
             cp -f "$IMG_FILE" boot_orig.img
           fi
 
-          test -f boot_orig.img || { echo "::error::No se encontró la imagen boot original"; exit 1; }
+          test -s boot_orig.img || { echo "::error::No se pudo descomprimir una imagen boot válida a boot_orig.img"; exit 1; }
           /mnt/work/tools/magiskboot unpack -h boot_orig.img
           python3 - <<'PY'
           from pathlib import Path
